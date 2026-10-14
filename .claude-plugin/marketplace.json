@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "mulgogi-mods",
+  "description": "한국어 화면의 Claude Code mod 모음: 입력창 위 버튼·상태 줄과 명령 팔레트(clickbar), 이 PC의 모든 대화를 보는 세션 패널(session-tracker)",
+  "owner": {
+    "name": "SJvaca30",
+    "url": "https://github.com/SJvaca30"
+  },
+  "plugins": [
+    {
+      "name": "clickbar",
+      "source": "./clickbar",
+      "description": "입력창 위 상태 줄(컨텍스트·사용 한도·가정)과 버튼 줄, 턴 작업 카드, 명령 추천, 한국어 / 메뉴, 명령·단축키·내 질문·답변·보관함·가정 팔레트"
+    },
+    {
+      "name": "session-tracker",
+      "source": "./session-tracker",
+      "description": "같은 폴더의 다른 Claude 세션을 입력창 위에 보여 주고, 세션 패널(/sessions)에서 이 PC의 모든 세션을 폴더별로 보고 Orca 탭으로 이동한다"
+    }
+  ]
+}

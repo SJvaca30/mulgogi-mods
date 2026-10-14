@@ -1,0 +1,475 @@
+import { expect, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
+
+import { cleanName, composerHasText, findTerminal, kindWord, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
+import { DEFAULT_VIEW, arrange, buildItems, dayTitle, orcaHasPath, parseHistory, parseIdList, parseView, sinceText } from '../hooks/sessions'
+import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
+import type { SessionRecord } from '../types'
+
+const NOW = Date.parse('2026-10-11T05:00:00Z')
+// 엔진은 경로 구분자를 바꿔 넘기므로, 대역에서는 소문자와 /로 맞춰 비교한다
+const norm = (path: string) => path.split('\\').join('/').toLowerCase()
+const rec = (over: Partial<SessionRecord>): SessionRecord => ({
+  id: 'other',
+  root: 'D:\\all',
+  status: 'working',
+  prompt: '결제 API 오류 고쳐 줘',
+  changedAt: NOW - 120_000,
+  at: NOW - 30_000,
+  ...over,
+})
+
+test('같은 폴더의 살아 있는 다른 세션만 고르고, 끝났거나 소식이 끊긴 세션과 나 자신은 뺀다', async () => {
+  const list = [
+    rec({ id: 'me' }),
+    rec({ id: 'other' }),
+    rec({ id: 'ended', status: 'ended' }),
+    rec({ id: 'stale', at: NOW - 10 * 60_000 }),
+    rec({ id: 'elsewhere', root: 'D:\\other-project' }),
+    rec({ id: 'idle', status: 'idle', changedAt: NOW - 60_000 }),
+  ]
+  expect(alivePeers(list, 'me', 'D:\\all', NOW).map(r => r.id)).toEqual(['idle', 'other'])
+  expect(rootKey('D:\\all')).toBe('D-all')
+  expect(parseRecord('{broken')).toBe(null)
+  expect(parseRecord(JSON.stringify(rec({}))))
+    .toEqual(rec({}))
+})
+
+test('Claude에게 붙이는 안내는 다른 세션이 작업 중일 때만 만든다', async () => {
+  expect(overlapNote([rec({ status: 'idle' })])).toBe(null)
+  expect(overlapNote([rec({})])).toBe(
+    '참고(session-tracker): 같은 폴더에서 다른 Claude 세션 1개가 작업 중이다(요청: "결제 API 오류 고쳐 줘"). 같은 파일을 동시에 고치지 않도록, 겹칠 것 같으면 먼저 사용자에게 확인하라.',
+  )
+})
+
+// 엔진 자리: 상태 폴더 하나에 이 세션과 다른 세션의 파일이 있다고 가정한다
+// jobDir를 주면 백그라운드 관리자가 띄운 세션(CLAUDE_JOB_DIR 있음)으로 흉내 낸다
+function fakeHost(on: Parameters<TestBody>[1], files: Map<string, string>, note: 'on' | 'off' | undefined, jobDir?: string, registered?: string[]) {
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? jobDir : undefined }))
+  on('session.root', () => ({ value: 'D:\\all' }))
+  on('session.id', () => ({ value: 'me' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('store.get', () => ({ value: note }))
+  on('command.register', (_, e) => {
+    registered?.push(e.name)
+    return { value: { command: e.name } }
+  })
+  on('fs.write', (_, e) => {
+    files.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('fs.list', () => ({
+    value: [...files.keys()].map(path => ({ name: path.split('/').pop() ?? path, kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false })),
+  }))
+  on('fs.read', (_, e) => ({ value: files.get(norm(e.path)) ?? '' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.every', () => ({ value: undefined }))
+}
+
+test('/sync는 설정 저장소의 동기화 스크립트가 있는 PC에서만 등록한다(mod를 받아 쓰는 PC에는 [sync]가 생기지 않는다)', async ($, on) => {
+  const registered: string[] = []
+  let hasScript = false
+  fakeHost(on, new Map(), undefined, undefined, registered)
+  on('fs.exists', (_, e) => ({ value: hasScript && norm(e.path) === 'c:/users/me/ccsetting/sync.ps1' }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  expect(registered).toContain('sessions')
+  expect(registered).not.toContain('sync')
+
+  hasScript = true
+  registered.length = 0
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  expect(registered).toContain('sync')
+})
+
+test('세션이 시작되면 자기 상태를 쓰고, band에서 다른 세션 줄을 더하되 다른 mod의 줄은 그대로 둔다', async ($, on) => {
+  const dir = 'C:/Users/me/.claude/mods-state/session-tracker/D-all'
+  const files = new Map([[norm(`${dir}/other.json`), JSON.stringify(rec({}))]])
+  fakeHost(on, files, undefined)
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['CLICKBAR'] }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  expect(JSON.parse(files.get(norm(`${dir}/me.json`)) ?? '{}').status).toBe('idle')
+
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await ui.find({ key: 'peer-other' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'CLICKBAR' })).toBeDefined()
+  // 세션 줄 위에는 "── 세션 ───" 가로줄을 band 폭(100칸)에 맞춰 긋는다. 한글 두 글자가 네 칸이라 글자 수는 98개다
+  expect((await ui.find({ type: 'Text', text: /^── 세션 ─/ }))?.text.length).toBe(98)
+  // CLAUDE_JOB_DIR가 없으면 포그라운드 세션이다
+  expect(await ui.find({ type: 'Text', text: ' 포그라운드 ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '탭을 닫으면 꺼짐 · 유지 /background' })).toBeDefined()
+  // 다른 세션은 상태별 개수로 줄인다
+  expect(await ui.find({ type: 'Text', text: '작업 중 1' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('백그라운드 세션이면 다른 세션이 없어도 band 세션 줄에 종류 배지와 끄는 법을 보인다', async ($, on) => {
+  const files = new Map<string, string>()
+  fakeHost(on, files, undefined, 'C:/Users/me/.claude/jobs/abc12345')
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['CLICKBAR'] }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: ' 백그라운드 ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '탭을 닫아도 켜져 있음 · 끄기 /stop' })).toBeDefined()
+  expect(await ui.find({ key: 'self-kind-sep' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'CLICKBAR' })).toBeDefined()
+  await ui.unmount()
+  expect(selfKindView('')).toBe(null)
+  expect(kindWord('interactive')).toBe('포그라운드')
+})
+
+test('다른 세션이 작업 중이면 질문에 안내 한 줄을 붙이고, 꺼 두면 붙이지 않는다', async ($, on) => {
+  const contexts: (readonly string[] | undefined)[] = []
+  const dir = 'C:/Users/me/.claude/mods-state/session-tracker/D-all'
+  let note: 'on' | 'off' | undefined
+  const files = new Map([[norm(`${dir}/other.json`), JSON.stringify(rec({}))]])
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
+  on('session.root', () => ({ value: 'D:\\all' }))
+  on('session.id', () => ({ value: 'me' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('store.get', () => ({ value: note }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('fs.write', (_, e) => {
+    files.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('fs.list', () => ({ value: [...files.keys()].map(path => ({ name: path.split('/').pop() ?? path, kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false })) }))
+  on('fs.read', (_, e) => ({ value: files.get(norm(e.path)) ?? '' }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.every', () => ({ value: undefined }))
+  on('prompt.submit', (_, e) => {
+    contexts.push(e.context)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '로그인 화면 고쳐 줘', wait: false, origin: { kind: 'composer' } })
+  note = 'off'
+  await $.prompt.submit({ text: '다른 질문', wait: false, origin: { kind: 'composer' } })
+  expect(contexts[0]?.some(c => c.startsWith('참고(session-tracker)'))).toBe(true)
+  expect(contexts[1] ?? []).toEqual([])
+})
+
+const AGENTS_JSON = JSON.stringify([
+  { pid: 1, id: '2561affb', cwd: 'D:\\other-project', kind: 'background', sessionId: '2561affb-1', name: 'frontend 2', status: 'idle', state: 'blocked' },
+  { pid: 2, id: 'abc12345', cwd: 'D:\\all', kind: 'background', sessionId: 'me', name: 'Claude mods 편의 기능 아이디어', status: 'busy', state: 'working' },
+  { pid: 3, id: '96394c1c', cwd: 'D:\\all', kind: 'background', sessionId: '96394c1c-1', name: 'Claude Code 설정 동기화 ⑂', status: 'idle', state: 'done' },
+  { pid: 4, cwd: 'D:\\other-project', kind: 'interactive', sessionId: '7148776f-1', name: 'SSO 연동', state: 'working' },
+  // 멈춘 백그라운드 세션: --all에만 나오고 pid가 없다
+  { id: '30a5238d', cwd: 'D:\\all', kind: 'background', sessionId: '30a5238d-1', name: '청년미래적금 연계가입 안내', state: 'done' },
+])
+const HISTORY = [
+  { display: '/sessions', project: 'D:\\all', sessionId: '83b9eb02-1', timestamp: NOW - 3_600_000 },
+  { display: 'Orca 세션 정리해 줘', project: 'D:\\all', sessionId: '83b9eb02-1', timestamp: NOW - 3_500_000 },
+  // 기록 파일이 30일이 지나 지워진 대화: 열 수 없으니 목록에 넣지 않는다
+  { display: '지워진 대화', project: 'D:\\all', sessionId: 'gone-1', timestamp: NOW - 40 * 86_400_000 },
+  ...[1, 2, 3, 4, 5, 6].map(i => ({ display: `예전 질문 ${i}`, project: 'D:\\all', sessionId: `old-${i}`, timestamp: NOW - (3 + i) * 86_400_000 })),
+]
+  .map(o => JSON.stringify(o))
+  .join('\n')
+const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+const entry = (name: string, kind: 'file' | 'dir', mtimeMs = NOW, size = 100) => ({ name, kind, size, mtimeMs, isLink: false })
+
+// 세션 패널 테스트의 엔진 자리: 기록 폴더 목록, history.jsonl, $.store, claude agents, 제목 도우미(pwsh), Orca를 흉내 낸다.
+// liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다
+function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set()) {
+  const ran: string[][] = []
+  const toasts: string[] = []
+  const commands: { command: string; args?: string }[] = []
+  const store = new Map<string, unknown>()
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? 'C:/Users/me/.claude/jobs/abc12345' : undefined }))
+  on('session.root', () => ({ value: 'D:\\all' }))
+  on('session.id', () => ({ value: 'me' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('clock.sleep', () => ({ value: undefined }))
+  // [끄기]의 5초 타이머는 테스트 안에서 끝나지 않게 둔다(바로 끝내면 한 번 누른 상태가 곧장 풀린다)
+  on('clock.after', () => new Promise<never>(() => undefined))
+  on('clock.every', () => ({ value: undefined }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('agent.list', () => ({ value: [] }))
+  on('command.run', (_, e) => {
+    commands.push({ command: e.command, args: e.args })
+    return {}
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', () => ({ value: { kind: 'file' as const, size: HISTORY.length, mtimeMs: NOW, isLink: false } }))
+  on('fs.read', (_, e) => ({ value: norm(e.path).endsWith('/history.jsonl') ? HISTORY : '' }))
+  on('fs.list', (_, e) => {
+    const p = norm(e.path)
+    if (p.endsWith('/.claude/projects')) return { value: [entry('D--all', 'dir'), entry('D--other-project', 'dir'), entry('C--Users-FS-AppData-Local-Temp-x', 'dir')] }
+    if (p.endsWith('/projects/d--all')) {
+      return {
+        value: [
+          entry('me.jsonl', 'file'),
+          entry('96394c1c-1.jsonl', 'file'),
+          entry('30a5238d-1.jsonl', 'file', NOW - 2 * 86_400_000),
+          entry('83b9eb02-1.jsonl', 'file', NOW - 3_000_000),
+          entry('spare-1.jsonl', 'file'),
+          ...[1, 2, 3, 4, 5, 6].map(i => entry(`old-${i}.jsonl`, 'file', NOW - (3 + i) * 86_400_000)),
+          entry('83b9eb02-1', 'dir'),
+        ],
+      }
+    }
+    if (p.endsWith('/projects/d--other-project')) return { value: [entry('2561affb-1.jsonl', 'file'), entry('7148776f-1.jsonl', 'file')] }
+    if (p.includes('appdata-local-temp')) return { value: [entry('scratch-1.jsonl', 'file')] }
+
+    return { value: [] }
+  })
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+    ran.push(argv)
+    if (argv[0] === 'claude' && argv[1] === 'agents') {
+      if (argv.includes('--all')) return ok(AGENTS_JSON)
+      const fresh = JSON.parse(AGENTS_JSON).filter((r: { pid?: number }) => r.pid !== undefined)
+      for (const id of liveAlso) fresh.push({ pid: 9, cwd: 'D:\\all', kind: 'interactive', sessionId: id, name: id })
+      return ok(JSON.stringify(fresh))
+    }
+    if (argv[0] === 'pwsh') {
+      const paths = String(e.init?.stdin ?? '').split('\n').filter(Boolean)
+      const found = paths.map(path => ({ p: path, c: '', a: path.endsWith('83b9eb02-1.jsonl') ? 'Orca의 미사용 세션' : '', w: path.includes('spare-1') ? '' : 'D:\\all' }))
+      return ok(JSON.stringify(found))
+    }
+    if (argv[1] === 'worktree') return ok(JSON.stringify({ ok: true, result: { worktrees: [{ path: 'D:\\all' }, { path: 'D:\\other-project' }] } }))
+    if (argv[2] === 'list') return ok(JSON.stringify({ ok: true, result: { terminals: [{ handle: 'term_b', title: '⠂ SSO 연동' }, { handle: 'term_c', title: '⠂ Claude Code 설정 동기화 ⑂' }] } }))
+    if (argv[2] === 'read') return ok(JSON.stringify({ ok: true, result: { terminal: { tail: ['─'.repeat(40), '❯ ', '─'.repeat(40)] } } }))
+
+    return ok('{}')
+  })
+
+  return { ran, toasts, commands, store }
+}
+
+async function openPanel($: Parameters<TestBody>[0]) {
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'sessions', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  return $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'session-tracker-panel',
+    props: { title: '세션', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  })
+}
+
+test('모든 대화 목록: 켜진 대화와 기록이 남은 꺼진 대화를 합치고, 폴더별·날짜별·고정·보관으로 한 번씩만 놓는다', async () => {
+  const rows = parseAgents(AGENTS_JSON, 'me')
+  expect(rows.find(r => r.sessionId === 'me')?.isSelf).toBe(true)
+  expect(rows.find(r => r.sessionId === '30a5238d-1')?.isLive).toBe(false)
+  const files = ['me', '96394c1c-1', '30a5238d-1', '83b9eb02-1', 'spare-1', '2561affb-1', '7148776f-1'].map(id => ({
+    sessionId: id,
+    slug: id.startsWith('2561') || id.startsWith('7148') ? 'D--other-project' : 'D--all',
+    path: `C:/x/${id}.jsonl`,
+    mtimeMs: id === '30a5238d-1' ? NOW - 2 * 86_400_000 : id === '83b9eb02-1' ? NOW - 3_000_000 : NOW,
+    size: 100,
+  }))
+  const titles = {
+    '83b9eb02-1': { m: 0, s: 0, t: 'Orca의 미사용 세션', k: 'ai' as const, c: 'D:\\all' },
+    'spare-1': { m: 0, s: 0, t: '', k: '' as const, c: '' },
+  }
+  const items = buildItems({ rows, files, titles, names: {}, history: parseHistory(HISTORY), now: NOW })
+  const byId = new Map(items.map(it => [it.sessionId, it]))
+  expect(byId.get('83b9eb02-1')).toMatchObject({ kind: 'off', name: 'Orca의 미사용 세션', reopen: 'resume', cwd: 'D:\\all' })
+  expect(byId.get('30a5238d-1')).toMatchObject({ kind: 'off', name: '청년미래적금 연계가입 안내', reopen: 'attach', shortId: '30a5238d' })
+  // 기록 파일이 없는 대화와 이름·질문이 없는 빈 세션은 뺀다
+  expect(byId.has('gone-1')).toBe(false)
+  expect(byId.has('spare-1')).toBe(false)
+  // 첫 질문은 슬래시 명령을 건너뛴다
+  expect(parseHistory(HISTORY).get('83b9eb02-1')?.firstPrompt).toBe('Orca 세션 정리해 줘')
+
+  const folder = arrange(items, { view: DEFAULT_VIEW, pins: [], archived: [], showArchived: false, now: NOW })
+  expect(folder.groups.map(g => g.title)).toEqual(['D:\\all', 'D:\\other-project'])
+  // 폴더 안에서는 켜진 대화(작업 중 → 나머지)가 먼저, 꺼진 대화는 최근 것부터
+  expect(folder.groups[0]?.items.map(it => it.sessionId)).toEqual(['me', '96394c1c-1', '83b9eb02-1', '30a5238d-1'])
+  expect(folder.groups[1]?.items.map(it => it.sessionId)).toEqual(['2561affb-1', '7148776f-1'])
+
+  const offByDate = arrange(items, { view: { mode: 'date', filter: { folder: 'all', date: 'off' } }, pins: [], archived: [], showArchived: false, now: NOW })
+  expect(offByDate.groups.map(g => g.title)).toEqual(['오늘', dayTitle(NOW - 2 * 86_400_000, NOW)])
+  expect(offByDate.groups.flatMap(g => g.items).every(it => it.kind === 'off')).toBe(true)
+
+  // 고정한 대화는 필터와 상관없이 맨 위에, 묶음에는 다시 나오지 않는다. 보관한 대화는 보관함에만
+  const pinned = arrange(items, { view: { mode: 'folder', filter: { folder: 'off', date: 'all' } }, pins: ['me'], archived: ['30a5238d-1'], showArchived: false, now: NOW })
+  expect(pinned.pinned.map(it => it.sessionId)).toEqual(['me'])
+  expect(pinned.groups.flatMap(g => g.items).map(it => it.sessionId)).toEqual(['83b9eb02-1'])
+  const box = arrange(items, { view: DEFAULT_VIEW, pins: ['me'], archived: ['30a5238d-1'], showArchived: true, now: NOW })
+  expect(box.groups.flatMap(g => g.items).map(it => it.sessionId)).toEqual(['30a5238d-1'])
+
+  expect(dayTitle(NOW, NOW)).toBe('오늘')
+  expect(dayTitle(NOW - 86_400_000, NOW)).toBe('어제')
+  expect(sinceText(3 * 86_400_000)).toBe('3일 전')
+  expect(stateWord('waiting').word).toBe('입력 필요')
+  expect(stateWord('idle').word).toBe('대기 중')
+  expect(parseView({ mode: 'date', filter: { folder: 'on', date: 'weird' } })).toEqual({ mode: 'date', filter: { folder: 'on', date: 'all' } })
+  expect(parseIdList(['a', 1, 'b'])).toEqual(['a', 'b'])
+  expect(orcaHasPath(JSON.stringify({ result: { worktrees: [{ path: 'd:/all/' }] } }), 'D:\\all')).toBe(true)
+  expect(stateCounts(rows.filter(r => r.isLive)).map(c => `${c.word} ${c.n}`)).toEqual(['입력 필요 1', '작업 중 2', '답변 완료 1'])
+  const orca = JSON.stringify({ ok: true, result: { terminals: [{ handle: 'term_a', title: '✳ frontend 2' }, { handle: 'term_b', title: '⠂ SSO 연동' }] } })
+  expect(findTerminal(orca, 'SSO 연동')).toBe('term_b')
+  expect(findTerminal(orca, '없는 세션')).toBe(null)
+})
+
+test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터를 저장하고, 고정·보관·복구·열기를 한다', async ($, on) => {
+  const host = panelHost(on)
+  const ui = await openPanel($)
+  expect(await ui.find({ key: 'agent-open-83b9eb02-1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Orca의 미사용 세션' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '유휴' })).toBeDefined()
+  expect(await ui.find({ key: 'agent-open-spare-1' })).toBeUndefined()
+  expect(await ui.find({ key: 'agent-open-scratch-1' })).toBeUndefined()
+  // 켜진 대화의 이동: Orca 탭이 있으면 전환, 탭 없는 백그라운드 세션은 새 탭에서 붙인다
+  await ui.press({ key: 'agent-go-7148776f-1' })
+  await ui.press({ key: 'agent-go-2561affb-1' })
+  expect(host.ran).toContainEqual(['claude', 'agents', '--json', '--all'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_b', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\other-project', '--title', 'frontend 2', '--command', 'claude attach 2561affb-1', '--focus', '--json'])
+  // 보기와 상태 필터는 저장되고, 필터는 보기마다 따로다
+  await ui.press({ key: 'view-date' })
+  await ui.press({ key: 'filter-off' })
+  expect(host.store.get('view')).toEqual({ mode: 'date', filter: { folder: 'all', date: 'off' } })
+  expect(await ui.find({ key: 'agent-go-2561affb-1' })).toBeUndefined()
+  await ui.press({ key: 'filter-all' })
+  await ui.press({ key: 'view-folder' })
+  // 묶음마다 꺼진 대화는 5개만 보이고, [더 보기]로 편다
+  expect(await ui.find({ key: 'agent-old-6' })).toBeUndefined()
+  await ui.press({ key: 'more-d:\\all' })
+  expect(await ui.find({ key: 'agent-old-6' })).toBeDefined()
+  await ui.press({ key: 'less-d:\\all' })
+  expect(await ui.find({ key: 'agent-old-6' })).toBeUndefined()
+  // 날짜별 보기는 폴더 끝 이름을 줄지 않게 붙인다(긴 이름이 대신 줄바꿈된다)
+  await ui.press({ key: 'view-date' })
+  expect(await ui.find({ type: 'Text', text: 'all' })).toBeDefined()
+  await ui.press({ key: 'view-folder' })
+  // 고정: [관리]를 열어 누르면 맨 위에 한 번만
+  expect(await ui.find({ key: 'agent-pin-83b9eb02-1' })).toBeUndefined()
+  await ui.press({ key: 'agent-manage-83b9eb02-1' })
+  await ui.press({ key: 'agent-pin-83b9eb02-1' })
+  expect(host.store.get('pins')).toEqual(['83b9eb02-1'])
+  expect((await ui.findAll({ key: 'agent-83b9eb02-1' })).length).toBe(1)
+  await ui.press({ key: 'agent-manage-83b9eb02-1' })
+  expect(await ui.find({ type: 'Text', text: '[고정 해제]' })).toBeDefined()
+  await ui.press({ key: 'agent-manage-83b9eb02-1' })
+  // 보관: 목록에서 사라지고, 보관함에서 복구한다
+  await ui.press({ key: 'agent-manage-30a5238d-1' })
+  await ui.press({ key: 'agent-archive-30a5238d-1' })
+  expect(host.store.get('archived')).toEqual(['30a5238d-1'])
+  expect(await ui.find({ key: 'agent-30a5238d-1' })).toBeUndefined()
+  await ui.press({ key: 'archive-toggle' })
+  await ui.press({ key: 'agent-restore-30a5238d-1' })
+  expect(host.store.get('archived')).toEqual([])
+  await ui.press({ key: 'archive-toggle' })
+  // 열기: 기록만 남은 대화는 --resume, 멈춘 백그라운드 세션은 attach
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', 'Orca의 미사용 세션', '--command', 'claude --resume 83b9eb02-1', '--focus', '--json'])
+  await ui.press({ key: 'agent-open-30a5238d-1' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', '청년미래적금 연계가입 안내', '--command', 'claude attach 30a5238d', '--focus', '--json'])
+  await ui.unmount()
+})
+
+test('세션 패널: [열기] 직전에 다시 보고 그사이 켜진 대화는 두 번 열지 않는다', async ($, on) => {
+  const host = panelHost(on, new Set(['83b9eb02-1']))
+  const ui = await openPanel($)
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  expect(host.ran.some(a => a.includes('claude --resume 83b9eb02-1'))).toBe(false)
+  expect(host.toasts.some(t => t.includes('그사이 켜져'))).toBe(true)
+  await ui.unmount()
+})
+
+test('권한 판정이 "물어봄"이면 승인 대기로, 도구가 돌기 시작하면 다시 작업 중으로 기록한다', async ($, on) => {
+  const files = new Map<string, string>()
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
+  on('session.root', () => ({ value: 'D:\all' }))
+  on('session.id', () => ({ value: 'me' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('fs.write', (_, e) => {
+    files.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('fs.list', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.every', () => ({ value: undefined }))
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  on('tool.call', () => ({ result: 'ok' }))
+  await $.session.start({ cwd: 'D:\all', surface: 'terminal', isInteractive: true })
+  const mine = () => JSON.parse(files.get(norm('C:/Users/me/.claude/mods-state/session-tracker/D-all/me.json')) ?? '{}').status
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
+  expect(mine()).toBe('waiting')
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+  expect(mine()).toBe('working')
+})
+
+test('이름 고치기 준비: 다른 세션 입력창이 비었는지 화면으로 보고, 이름은 한 줄 60자로 정리한다', async () => {
+  const screen = (lines: string[]) => JSON.stringify({ ok: true, result: { terminal: { tail: lines } } })
+  const border = '─'.repeat(40)
+  expect(composerHasText(screen(['❯ /reload-plugins', '  ⎿  Reloaded', border, '❯ ', border]))).toBe(false)
+  expect(composerHasText(screen([border, '❯ Try "how do I log an error?"', border]))).toBe(false)
+  expect(composerHasText(screen([border, '❯ 쓰던 질문', border]))).toBe(true)
+  // 여러 줄로 쓰던 글도 쓴 글이다
+  expect(composerHasText(screen([border, '❯ ', '  둘째 줄', border]))).toBe(true)
+  // 오른쪽에 붙은 패널 글자는 보지 않는다
+  expect(composerHasText(screen([`${border}│패널`, '❯                    │[이동] frontend 2', `${border}│`]))).toBe(false)
+  // 입력창을 찾지 못하면(대화상자 등) 건드리지 않는다
+  expect(composerHasText(screen(['Do you want to proceed?', '❯ 1. Yes']))).toBe(true)
+  expect(composerHasText('not json')).toBe(true)
+  expect(cleanName('  새\n이름\t ')).toBe('새 이름')
+  expect(cleanName('가'.repeat(80)).length).toBe(60)
+})
+
+test('세션 패널: 이름을 눌러 고치고, 다른 세션은 그 Orca 탭에 /rename을 친다. [끄기]는 두 번 눌러야 끈다', async ($, on) => {
+  const host = panelHost(on)
+  const ui = await openPanel($)
+  // 이 대화: 내장 /rename
+  await ui.press({ key: 'agent-rename-me' })
+  expect(await ui.find({ key: 'rename-input' })).toBeDefined()
+  await ui.input({ key: 'rename-input', text: 'mods 개발', kind: 'submit' })
+  expect(host.commands).toContainEqual({ command: 'rename', args: 'mods 개발' })
+  // 다른 세션: 입력창이 빈 것을 확인한 뒤 그 탭에 /rename을 친다
+  await ui.press({ key: 'agent-rename-96394c1c-1' })
+  await ui.input({ key: 'rename-input', text: ' sync 정리 ', kind: 'submit' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'read', '--terminal', 'term_c', '--screen', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'send', '--terminal', 'term_c', '--text', '/rename sync 정리', '--enter', '--json'])
+  // 입력·승인을 기다리는 세션은 건드리지 않는다
+  await ui.press({ key: 'agent-rename-2561affb-1' })
+  await ui.input({ key: 'rename-input', text: 'x', kind: 'submit' })
+  expect(host.ran.some(a => a.includes('/rename x'))).toBe(false)
+  // 꺼진 대화는 이름을 바꿀 수 없다
+  expect(await ui.find({ key: 'agent-rename-83b9eb02-1' })).toBeUndefined()
+  // [끄기]: [관리]를 열고, 한 번 누르면 [정말 끄기]로 바뀌고, 두 번째에 claude stop <짧은 id>
+  await ui.press({ key: 'agent-manage-96394c1c-1' })
+  await ui.press({ key: 'agent-stop-96394c1c-1' })
+  expect(host.ran.some(a => a[1] === 'stop')).toBe(false)
+  expect(await ui.find({ type: 'Text', text: '[정말 끄기]' })).toBeDefined()
+  await ui.press({ key: 'agent-stop-96394c1c-1' })
+  expect(host.ran).toContainEqual(['claude', 'stop', '96394c1c'])
+  // 이 대화와 포그라운드 세션, 꺼진 대화는 [관리]를 열어도 [끄기]가 없다. 이 대화는 [보관]도 없고, 꺼진 대화는 이름을 못 바꾼다
+  await ui.press({ key: 'agent-manage-me' })
+  expect(await ui.find({ key: 'agent-stop-me' })).toBeUndefined()
+  expect(await ui.find({ key: 'agent-archive-me' })).toBeUndefined()
+  await ui.press({ key: 'agent-manage-7148776f-1' })
+  expect(await ui.find({ key: 'agent-stop-7148776f-1' })).toBeUndefined()
+  await ui.press({ key: 'agent-manage-30a5238d-1' })
+  expect(await ui.find({ key: 'agent-stop-30a5238d-1' })).toBeUndefined()
+  expect(await ui.find({ key: 'agent-rename-menu-30a5238d-1' })).toBeUndefined()
+  await ui.unmount()
+})

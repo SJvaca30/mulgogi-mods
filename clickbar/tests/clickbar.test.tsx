@@ -1,0 +1,592 @@
+import { expect, test } from 'claude-code/testing'
+
+import { cardText, countPatch, editDelta, roughDelta } from '../hooks/card'
+import { ASSUME_TOOL, correctionPrompt } from '../hooks/assumptions'
+import { promptsFromTranscript } from '../hooks/prompts'
+import { unfence } from '../hooks/replies'
+import { bar, kTokens, limitView, untilText, usdText, viewOf } from '../hooks/meter'
+import { SYNC_STALE_MS, parseSyncStatus, syncView } from '../hooks/sync'
+
+const band = (bodyColumns: number) =>
+  ({
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  }) as const
+
+test('미터는 자동 압축 임계값 기준으로 계산하고, 꺼져 있으면 모델 창 기준으로 바꾼다', async () => {
+  const normal = viewOf({ tokens: 94000, window: 200000, threshold: 160000 })
+  expect(normal?.percent).toBe(59)
+  expect(normal?.left).toBe(66000)
+  expect(normal?.basis).toBe('compact')
+  expect(normal?.tone).toBe('normal')
+  expect(viewOf({ tokens: 120000, window: 200000, threshold: 160000 })?.tone).toBe('warn')
+  expect(viewOf({ tokens: 152000, window: 200000, threshold: 160000 })?.tone).toBe('bad')
+  expect(viewOf({ tokens: 170000, window: 200000, threshold: 160000 })?.left).toBe(0)
+  expect(viewOf({ tokens: 100000, window: 200000, threshold: null })?.basis).toBe('window')
+  expect(viewOf({ tokens: null, window: 200000, threshold: 160000 })).toBe(null)
+  expect(bar(59)).toBe('██████░░░░')
+  expect(kTokens(66000)).toBe('66k')
+  expect(kTokens(800)).toBe('800')
+})
+
+test('한도는 band에 사용 비율과 초기화 시각만, 팔레트에는 남은 시간까지 보여 주고, 초기화 시각이 지나면 0%로 바꾼다', async () => {
+  const now = Date.parse('2026-10-08T05:00:00Z')
+  const low = limitView({ kind: 'five_hour', percentUsed: 31.4, resetsAt: '2026-10-08T07:10:00Z' }, now)
+  // 시각은 실행 환경의 현지 시각이라 숫자 자리는 정규식으로 본다
+  expect(low.text).toMatch(/^5시간 31% \(\d\d:10\)$/)
+  expect(low.short).toMatch(/^5시간 31% \(\d\d:10\)$/)
+  expect(low.isHigh).toBe(false)
+  expect(low.detail).toMatch(/^5시간 31% · \d\d:10 초기화\(2시간 10분 뒤\)$/)
+  const high = limitView({ kind: 'seven_day', percentUsed: 92, resetsAt: '2026-10-11T05:00:00Z' }, now)
+  expect(high.short).toMatch(/^주간 92% \(10\/11 \d\d:00\)$/)
+  expect(high.text).toMatch(/^주간 92% \(10\/11\(일\) \d\d:00\)$/)
+  // 팔레트 한 줄에 둘을 놓으므로 요일을 뺀다
+  expect(high.detail).toMatch(/^주간 92% · 10\/11 \d\d:00 초기화\(3일 0시간 뒤\)$/)
+  expect(high.tone).toBe('bad')
+  const past = limitView({ kind: 'five_hour', percentUsed: 88, resetsAt: '2026-10-08T04:00:00Z' }, now)
+  expect(past.short).toBe('5시간 0%')
+  expect(past.isHigh).toBe(false)
+  expect(untilText(30 * 3600000)).toBe('1일 6시간')
+  expect(usdText(1.234)).toBe('≈$1.23')
+  expect(usdText(27.1)).toBe('≈$27')
+})
+
+test('작업 카드는 diff의 +/- 줄을 세고, 새 파일은 내용 줄 수로 센다', async () => {
+  expect(countPatch([{ lines: [' a', '-b', '+c', '+d'] }, { lines: ['-e'] }])).toEqual({ add: 2, del: 2 })
+  expect(editDelta({ filePath: 'D:/all/x.md', structuredPatch: [{ lines: ['+1', '+2', '-3'] }] })).toEqual({
+    path: 'D:/all/x.md',
+    delta: { add: 2, del: 1 },
+  })
+  expect(editDelta({ type: 'create', filePath: 'new.ts', content: 'a\nb\nc\n', structuredPatch: [] })?.delta).toEqual({ add: 3, del: 0 })
+  expect(editDelta({ filePath: 'held.ts', staged: true, structuredPatch: [{ lines: ['+1'] }] })).toBe(null)
+  expect(editDelta('not a record')).toBe(null)
+  expect(roughDelta('a\nb\nc', 'a\nX\nY\nc')).toEqual({ add: 2, del: 1 })
+  expect(roughDelta('', 'x')).toEqual({ add: 1, del: 0 })
+
+  const text = cardText({
+    files: new Map([
+      ['D:\\all\\a.md', { add: 40, del: 7 }],
+      ['C:/x/b.ts', { add: 2, del: 0 }],
+    ]),
+    tokens: 8200,
+    usd: 0.123,
+    isAborted: false,
+  })
+  // 끝난 시각과 걸린 시간은 내장 줄이 보여 주므로 카드에 없다
+  expect(text).toBe('파일 2개 +42 −7 (a.md, b.ts) · 컨텍스트 +8k · API 환산 ≈$0.12')
+  // 남길 것이 없으면 빈 글이고, 중단된 턴은 "중단됨"만 남긴다
+  expect(cardText({ files: new Map(), tokens: 0, usd: 0.001, isAborted: false })).toBe('')
+  expect(cardText({ files: new Map(), tokens: null, usd: null, isAborted: true })).toBe('중단됨')
+})
+
+test('작업 카드: 턴 동안 Edit 결과를 모아 턴이 끝나면 한 줄을 남긴다', async ($, on) => {
+  const logged: string[] = []
+  const usage = (tokens: number, usd: number) => ({ startedAt: 0, context: { window: 1000000, tokens }, rateLimits: [], cost: { usd } })
+  let live = usage(42000, 1.2)
+  on('clock.now', () => ({ value: Date.parse('2026-10-08T05:32:00Z') }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: live }))
+  on('ui.log', (_, e) => {
+    logged.push(e.text)
+    return { value: undefined }
+  })
+  // 엔진 자리를 대신한다. Edit는 실제로 실행하지 않고 결과 모양만 돌려준다
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('tool.call', () => ({ result: { filePath: 'D:/all/a.md', structuredPatch: [{ lines: ['+x', '+z', '-y'] }] } }))
+
+  await $.session.measure({ context: live.context, rateLimits: [], cost: live.cost, changed: ['context', 'cost'] })
+  await $.turn.start({ text: '고쳐 줘', turnId: 't1' })
+  const edit = await $.tool.call({ tool: 'Edit', tool_use_id: 'u1', file_path: 'D:/all/a.md', old_string: 'y', new_string: 'x\nz' })
+  expect(edit.result).toBeDefined()
+  live = usage(50200, 1.323)
+  await $.turn.complete({ answer: '끝', durationMs: 64000, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  expect(logged).toHaveLength(1)
+  expect(logged[0]).toBe('파일 1개 +2 −1 (a.md) · 컨텍스트 +8k · API 환산 ≈$0.12')
+
+  // 바뀐 것이 없는 턴은 줄을 남기지 않는다(기준값은 엔진이 알려 준 마지막 사용량)
+  await $.session.measure({ context: live.context, rateLimits: [], cost: live.cost, changed: ['context', 'cost'] })
+  await $.turn.start({ text: '고마워', turnId: 't2' })
+  await $.turn.complete({ answer: '네', durationMs: 3000, isAborted: false, turnId: 't2', reason: 'answer' })
+  expect(logged).toHaveLength(1)
+})
+
+test('동기화 결과 파일로 [sync] 버튼의 이름과 색을 정한다: 보류·실패·하루 넘게 안 돎', async () => {
+  const now = Date.parse('2026-10-14T03:00:00Z')
+  const held = parseSyncStatus(String.fromCharCode(0xfeff) + '{"at":"2026-10-14T02:00:00+09:00","result":"held","held":["a.md","b.md"],"message":"보류 2개"}')
+  expect(held?.held).toEqual(['a.md', 'b.md'])
+  expect(syncView(held, now)).toEqual({ word: 'sync held 2', color: 'warning' })
+  expect(syncView(parseSyncStatus('{"at":"2026-10-14T02:00:00Z","result":"failed","held":[],"message":"받기 실패"}'), now)).toEqual({ word: 'sync failed', color: 'error' })
+  const old = new Date(now - SYNC_STALE_MS - 60_000).toISOString()
+  expect(syncView(parseSyncStatus(`{"at":"${old}","result":"ok","held":[],"message":""}`), now)).toEqual({ word: 'sync stale', color: 'warning' })
+  expect(syncView(parseSyncStatus('{"at":"2026-10-14T02:30:00Z","result":"ok","held":[],"message":""}'), now)).toEqual({ word: 'sync', color: 'suggestion' })
+  // 파일이 없거나 형식이 다르면 문제 없는 것으로 본다
+  expect(parseSyncStatus('{broken')).toBe(null)
+  expect(parseSyncStatus('{"at":"x","result":"maybe"}')).toBe(null)
+  expect(syncView(null, now)).toEqual({ word: 'sync', color: 'suggestion' })
+})
+
+test('band: compact 버튼은 /compact를 실행하고, 좁으면 tasks·fork를 팔레트로 보낸다', async ($, on) => {
+  const ran: string[] = []
+  on('clock.now', () => ({ value: 0 }))
+  on('command.run', ($, e) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  // band는 다른 mod가 그린 내용(next)을 함께 보여주므로, 그 자리를 빈 Box로 채운다
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'clickbar', surface, ...band(120) })
+    expect(await ui.find({ key: 'band-fork' })).toBeDefined()
+    expect(await ui.find({ key: 'band-quote' })).toBeDefined()
+    // 터미널에서는 맨 위 가로줄이 채팅과 band를 가른다. 폭은 band 폭과 같다
+    const rule = await ui.find({ type: 'Text', text: /^── clickbar ─/ })
+    if (surface === 'terminal') expect(rule?.text.length).toBe(120)
+    else expect(rule).toBe(undefined)
+    await ui.press({ key: 'band-compact' })
+    await ui.unmount()
+  }
+  expect(ran).toEqual(['compact', 'compact'])
+  // 아주 좁아도 가로줄은 band 폭을 넘지 않는다(넘으면 한 줄 더 꺾인다)
+  const tiny = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(8) })
+  expect((await tiny.find({ type: 'Text', text: /^── click/ }))?.text.length).toBe(8)
+  await tiny.unmount()
+
+  const narrow = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(90) })
+  expect(await narrow.find({ key: 'band-fork' })).toBe(undefined)
+  expect(await narrow.find({ key: 'band-btw' })).toBeDefined()
+  // 지난 대화 전체 목록은 좁아도 늘 보인다
+  await narrow.press({ key: 'band-resume' })
+  await narrow.unmount()
+  expect(ran).toEqual(['compact', 'compact', 'resume'])
+})
+
+test('quote는 선택한 글을 인용 블록으로 넣고, btw는 쓰던 글을 질문으로 남긴다', async ($, on) => {
+  const filled: { text: string; mode: string }[] = []
+  on('clock.now', () => ({ value: 0 }))
+  on('ui.selection', () => ({ value: { text: '첫 줄\n둘째 줄' } }))
+  on('prompt.read', () => ({ value: { text: '이건 왜?', cursor: 5 } }))
+  on('prompt.fill', ($, e) => {
+    filled.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  const ui = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(120) })
+  await ui.press({ key: 'band-quote' })
+  await ui.press({ key: 'band-btw' })
+  await ui.unmount()
+  expect(filled).toEqual([
+    { text: '> 첫 줄\n> 둘째 줄\n\n', mode: 'insert' },
+    { text: '/btw "첫 줄 둘째 줄" 이건 왜?', mode: 'replace' },
+  ])
+})
+
+test('팔레트는 한국어 설명을 보여주고, ▶는 실행하되 인자가 필요한 /btw는 입력창에 넣는다', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  const ran: string[] = []
+  const filled: string[] = []
+  on('command.list', () => ({
+    value: [
+      { name: 'compact', description: 'Free up context', source: 'builtin' as const },
+      { name: 'btw', description: 'Ask aside', source: 'builtin' as const },
+      { name: 'rewind', description: 'Rewind', source: 'builtin' as const },
+      { name: 'stop', description: 'Stop this background session', source: 'builtin' as const },
+      { name: 'my-skill', description: 'A skill', source: 'user' as const },
+    ],
+  }))
+  on('command.run', ($, e) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  on('prompt.fill', ($, e) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
+  await $.command.run({ command: 'palette', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const ui = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: /대화를 요약해/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /그 밖의 명령 1개/ })).toBeDefined()
+  // 한국어 설명이 없는 명령도 검색하지 않아도 보인다
+  expect(await ui.find({ key: 'etc-run-my-skill' })).toBeDefined()
+  await ui.press({ key: 'fav-run-rewind' })
+  await ui.press({ key: 'fav-run-btw' })
+  // 잘못 누르면 하던 일이 멈추는 /stop은 입력창에만 넣는다
+  await ui.press({ key: 'g1-run-stop' })
+  // 검색어는 팔레트를 다시 열면 비운다
+  await ui.input({ key: 'search', text: 'zzz', kind: 'change' })
+  expect(await ui.find({ type: 'Text', text: /대화를 요약해/ })).toBeUndefined()
+  await $.command.run({ command: 'palette', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  expect(await ui.find({ type: 'Text', text: /대화를 요약해/ })).toBeDefined()
+  await ui.unmount()
+  expect(ran).toContain('rewind')
+  expect(ran).not.toContain('btw')
+  expect(ran).not.toContain('stop')
+  expect(filled).toEqual(['/btw ', '/stop '])
+})
+
+test('팔레트 탭: 단축키는 설치된 명령에만 ▶를 달고, 답변 탭의 copy는 그 답변을 복사한다', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  const ran: string[] = []
+  const copied: string[] = []
+  on('command.list', () => ({
+    value: [
+      { name: 'rewind', description: 'Rewind', source: 'builtin' as const },
+      { name: 'model', description: 'Model', source: 'builtin' as const },
+    ],
+  }))
+  on('command.run', (_, e) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  on('session.messages', () => ({
+    value: [
+      { role: 'user' as const, text: '첫 질문', toolUses: [] },
+      { role: 'assistant' as const, text: '첫 답변\n둘째 줄', toolUses: [] },
+      { role: 'user' as const, text: '둘째 질문', toolUses: [] },
+      // 도구 호출 사이의 중간 설명과 도구 결과 행은 답변 목록에 들어가지 않는다
+      { role: 'assistant' as const, text: '파일을 확인하겠습니다', toolUses: [] },
+      { role: 'user' as const, text: '', toolUses: [], toolResults: [{ tool_use_id: 'u1', text: 'ok', isError: false, result: null }] },
+      { role: 'assistant' as const, text: '', toolUses: [] },
+      { role: 'assistant' as const, text: '````markdown\n# 최신 답변 제목\n본문\n````', toolUses: [] },
+    ],
+  }))
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true as const } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  await $.command.run({ command: 'palette', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const ui = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  // 고정한 명령(rewind)은 맨 위 '고정한 명령'에만 나오고 아래 그룹에는 다시 나오지 않는다
+  expect(await ui.find({ key: 'fav-run-rewind' })).toBeDefined()
+  expect(await ui.find({ key: 'g1-run-rewind' })).toBe(undefined)
+
+  await ui.press({ key: 'tab-keys' })
+  expect(await ui.find({ type: 'Text', text: 'Esc Esc' })).toBeDefined()
+  expect(await ui.find({ key: 'key-run-fast' })).toBe(undefined)
+  await ui.press({ key: 'key-run-model' })
+  expect(ran.filter(c => c !== 'palette')).toEqual(['model'])
+  // 검색은 키와 설명에서 대소문자 없이 찾고, 맞는 것이 없는 묶음은 숨긴다
+  await ui.input({ key: 'search', text: 'ctrl+r', kind: 'change' })
+  expect(await ui.find({ type: 'Text', text: 'Ctrl+R' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Esc Esc' })).toBe(undefined)
+  expect(await ui.find({ type: 'Text', text: '모드 · 모델' })).toBe(undefined)
+  await ui.input({ key: 'search', text: '되감기', kind: 'change' })
+  expect(await ui.find({ type: 'Text', text: 'Esc Esc' })).toBeDefined()
+  await ui.input({ key: 'search', text: 'zzz', kind: 'change' })
+  expect(await ui.find({ type: 'Text', text: '찾는 단축키가 없습니다' })).toBeDefined()
+  await ui.input({ key: 'search', text: '', kind: 'change' })
+
+  await ui.press({ key: 'tab-replies' })
+  expect(await ui.find({ type: 'Text', text: '최신 답변 제목' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '파일을 확인하겠습니다' })).toBe(undefined)
+  expect(await ui.find({ key: 'reply-copy-2' })).toBe(undefined)
+  await ui.press({ key: 'reply-copy-1' })
+  // 바깥 ````markdown 펜스는 벗겨 복사한다
+  await ui.press({ key: 'reply-copy-0' })
+  await ui.unmount()
+  expect(copied).toEqual(['첫 답변\n둘째 줄', '첫 답변\n둘째 줄', '# 최신 답변 제목\n본문', '# 최신 답변 제목\n본문'])
+})
+
+test('답변을 감싼 바깥 마크다운 펜스만 벗기고, 안쪽 코드 블록과 받는 중인 답변은 그대로 둔다', async () => {
+  const inner = '# 제목\n| a | b |\n| - | - |\n```sql\nselect 1\n```'
+  expect(unfence('````markdown\n' + inner + '\n````')).toBe(inner)
+  expect(unfence('먼저 한 줄.\n\n````markdown\n' + inner + '\n````\n')).toBe('먼저 한 줄.\n\n' + inner + '\n')
+  expect(unfence('````markdown\n' + inner)).toBe('````markdown\n' + inner)
+  expect(unfence('```markdown\n# 세 개는 코드 예시\n```')).toBe('```markdown\n# 세 개는 코드 예시\n```')
+  expect(unfence('````\n| 태그 | 없음 |\n````')).toBe('| 태그 | 없음 |')
+  expect(unfence('````python\nprint(1)\n````')).toBe('````python\nprint(1)\n````')
+})
+
+test('화면에 그리는 답변에서만 바깥 펜스를 벗긴다', async ($, on) => {
+  const drawn: string[] = []
+  // 엔진 자리: 플러그인이 넘긴 글을 받아 적는다
+  on('ui.render', { component: 'AssistantMessage' }, (_, e) => {
+    drawn.push(e.props.text)
+    return { type: 'Text', props: {}, children: [e.props.text] } as never
+  })
+  for (const text of ['````markdown\n| a |\n| - |\n````', '그냥 답변']) {
+    await $.ui.render({ surface: 'terminal', component: 'AssistantMessage', requestId: 'r1', props: { text, isFirstOfReply: true } } as never)
+  }
+  expect(drawn).toEqual(['| a |\n| - |', '그냥 답변'])
+})
+
+test('fork 버튼은 무엇이 생겼는지 토스트로 알려 준다', async ($, on) => {
+  const toasts: string[] = []
+  on('clock.now', () => ({ value: 0 }))
+  on('command.run', () => ({ text: 'session waiting for a prompt · 사본 · c7d937ba' }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  const ui = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(120) })
+  await ui.press({ key: 'band-fork' })
+  await ui.unmount()
+  expect(toasts).toEqual(['fork: session waiting for a prompt · 사본 · c7d937ba · 지금 대화는 그대로 이어집니다'])
+})
+
+test('아이디어 보관함: /idea로 보관하면 프로젝트별로 저장되고, 보관함의 ▶는 입력창에 넣기만 한다', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const filled: { text: string; mode: string }[] = []
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
+  on('session.root', () => ({ value: 'D:\all' }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('command.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.read', () => ({ value: { text: '쓰던 글', cursor: 4 } }))
+  on('prompt.fill', (_, e) => {
+    filled.push({ text: e.text, mode: e.mode })
+    return { isFilled: true }
+  })
+  const run = (args: string) =>
+    $.command.run({ command: 'idea', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  await run('타임라인 기능 검토')
+  await run('')
+  expect(store.get('ideas:D:\all')).toEqual([{ text: '타임라인 기능 검토', at: Date.parse('2026-10-10T05:00:00Z') }])
+
+  const ui = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: '타임라인 기능 검토' })).toBeDefined()
+  await ui.press({ key: 'idea-use-0' })
+  // 지금 입력창의 글을 보관하면, 저장한 뒤 입력창을 비운다
+  await ui.press({ key: 'idea-shelve' })
+  await ui.unmount()
+  expect(filled).toEqual([
+    { text: '타임라인 기능 검토', mode: 'insert' },
+    { text: '', mode: 'replace' },
+  ])
+  expect((store.get('ideas:D:\all') as { text: string }[]).map(x => x.text)).toEqual(['쓰던 글', '타임라인 기능 검토'])
+})
+
+test('짐작 탭: "남은 것 모두 맞음"은 열린 것을 맞음으로 바꾸고, "목록 비우기"는 목록을 비운다', async ($, on) => {
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
+  on('store.get', () => ({ value: undefined }))
+  on('command.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  await $.tool.call({ tool: ASSUME_TOOL, assumptions: ['가', '나'] } as never)
+  const bandUi = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(120) })
+  await bandUi.press({ key: 'band-assume' })
+  await bandUi.unmount()
+  const pane = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  expect(await pane.find({ type: 'Text', text: '○' })).toBeDefined()
+  await pane.press({ key: 'assume-all-right' })
+  expect(await pane.find({ type: 'Text', text: '○' })).toBe(undefined)
+  expect(await pane.find({ type: 'Text', text: '✓' })).toBeDefined()
+  await pane.press({ key: 'assume-clear' })
+  expect(await pane.find({ type: 'Text', text: '✓' })).toBe(undefined)
+  await pane.unmount()
+})
+
+test('가정 확인: 도구로 한 번에 기록하고, band에 ◆를 띄우고, 틀린 것만 고쳐 달라고 보낸다', async ($, on) => {
+  const submitted: string[] = []
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
+  on('store.get', () => ({ value: undefined }))
+  on('command.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+
+  const answer = await $.tool.call({ tool: ASSUME_TOOL, assumptions: ['표는 날짜순으로 정렬한다', '  ', '금액은 원 단위다'] } as never)
+  expect(answer.result).toBe('2개 기록됨. 사용자가 clickbar에서 확인한다. 계속 진행하라.')
+
+  for (const columns of [120, 60]) {
+    const ui = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(columns) })
+    expect(await ui.find({ key: 'band-assume' })).toBeDefined()
+    if (columns === 120) await ui.press({ key: 'band-assume' })
+    await ui.unmount()
+  }
+
+  const pane = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  const id = `${Date.parse('2026-10-10T05:00:00Z')}`
+  await pane.press({ key: `assume-wrong-${id}-0` })
+  await pane.press({ key: `assume-right-${id}-1` })
+  await pane.press({ key: 'assume-send' })
+  await pane.unmount()
+  expect(submitted).toEqual([
+    [
+      '방금 작업에서 세운 가정 중 아래는 틀렸어. 이 부분만 고쳐 줘.',
+      '1. 가정: 표는 날짜순으로 정렬한다',
+      '   → 이 가정을 버리고 다시 판단해 줘',
+      '',
+      '맞다고 확인한 가정(그대로 둬): 금액은 원 단위다',
+    ].join('\n'),
+  ])
+  expect(correctionPrompt([{ id: 'x', text: 'A', at: 0, status: 'wrong', fix: ' B ', agent: '' }])).toBe(
+    ['방금 작업에서 세운 가정 중 아래는 틀렸어. 이 부분만 고쳐 줘.', '1. 가정: A', '   → 대신: B'].join('\n'),
+  )
+})
+
+test('가정 기록을 꺼 두면 세션 시작 때 도구를 등록하지 않고, 불려도 기록하지 않는다', async ($, on) => {
+  const registered: string[] = []
+  let mode: string | undefined = 'off'
+  on('store.get', (_, e) => ({ value: e.key === 'assumptions' ? mode : undefined }))
+  on('tool.register', (_, e) => {
+    registered.push(e.name)
+    return { value: { tool: `mcp__clickbar__${e.name}` } }
+  })
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'D:\all', surface: 'terminal', isInteractive: true })
+  expect(registered).toEqual([])
+  const answer = await $.tool.call({ tool: ASSUME_TOOL, assumptions: ['아무거나'] } as never)
+  expect(answer.result).toBe('가정 기록이 꺼져 있다. 이 도구를 더 부르지 마라.')
+  // 대조군: 켜져 있으면 같은 세션 시작에서 도구를 등록한다
+  mode = undefined
+  await $.session.start({ cwd: 'D:\all', surface: 'terminal', isInteractive: true })
+  expect(registered).toEqual(['log_assumption'])
+})
+
+test('보관함의 Send는 보낸 것이 확인된 뒤에만 아이디어를 지운다', async ($, on) => {
+  const store = new Map<string, unknown>([['ideas:D:\all', [{ text: '첫째', at: 1 }, { text: '둘째', at: 2 }]]])
+  let accept = false
+  on('clock.now', () => ({ value: 3 }))
+  on('session.root', () => ({ value: 'D:\all' }))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('command.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_, e) => (accept ? { text: e.text } : { drop: 'blocked' }))
+  await $.command.run({ command: 'idea', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const ui = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  await ui.press({ key: 'idea-send-0' })
+  expect((store.get('ideas:D:\all') as unknown[]).length).toBe(2)
+  accept = true
+  await ui.press({ key: 'idea-send-0' })
+  await ui.unmount()
+  expect((store.get('ideas:D:\all') as { text: string }[]).map(x => x.text)).toEqual(['둘째'])
+})
+
+test('기록 파일에서 사람이 직접 보낸 질문만 꺼낸다', async () => {
+  const lines = [
+    { type: 'user', uuid: 'u1', timestamp: '2026-10-10T05:00:00Z', message: { content: '첫 질문' } },
+    { type: 'user', uuid: 'u2', timestamp: '2026-10-10T05:01:00Z', message: { content: '<command-name>/clear</command-name>' } },
+    { type: 'user', uuid: 'u3', timestamp: '2026-10-10T05:02:00Z', message: { content: [{ type: 'tool_result', content: 'ok' }] } },
+    { type: 'user', uuid: 'u4', timestamp: '2026-10-10T05:03:00Z', isMeta: true, message: { content: '숨은 글' } },
+    { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'text', text: '답' }] } },
+    { type: 'user', uuid: 'u5', timestamp: '2026-10-10T05:04:00Z', message: { content: [{ type: 'text', text: '둘째 질문' }] } },
+  ]
+    .map(x => JSON.stringify(x))
+    .join('\n')
+  expect(promptsFromTranscript(`${lines}\n{broken`).map(p => [p.uuid, p.text])).toEqual([
+    ['u1', '첫 질문'],
+    ['u5', '둘째 질문'],
+  ])
+})
+
+test('내 질문: 보낸 질문만 모아 보여 주고, 이동이 안 되면 오류 대신 안내한다', async ($, on) => {
+  const toasts: string[] = []
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
+  on('command.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  await $.session.append({
+    message: { type: 'user', role: 'user', content: [{ type: 'text', text: '표를 날짜순으로 정리해 줘' }] },
+    door: 'prompt',
+    origin: { kind: 'composer' },
+    uuid: 'row-1',
+  } as never)
+  await $.session.append({
+    message: { type: 'user', role: 'user', content: [{ type: 'text', text: '<task-notification>끝</task-notification>' }] },
+    door: 'prompt',
+    origin: { kind: 'task-notification' },
+    uuid: 'row-2',
+  } as never)
+
+  await $.command.run({ command: 'palette', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const ui = await $.ui.mount({
+    plugin: 'clickbar',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'clickbar-palette',
+    props: { title: '명령', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  await ui.press({ key: 'tab-prompts' })
+  expect(await ui.find({ type: 'Text', text: '표를 날짜순으로 정리해 줘' })).toBeDefined()
+  expect(await ui.find({ key: 'prompt-jump-1' })).toBe(undefined)
+  await ui.press({ key: 'prompt-jump-0' })
+  await ui.unmount()
+  // 테스트 환경에는 대화 행이 그려져 있지 않아 이동은 거절된다. 실제 이동은 화면에서 확인한다
+  expect(toasts).toEqual(['그 질문 위치로 갈 수 없습니다. 압축 이전 대화이거나 화면에 그려지지 않은 질문입니다'])
+})
+
+test('명령 추천: 질문 문장이 내장 명령과 맞으면 한 번만 알려 주고, 질문은 바꾸지 않는다', async ($, on) => {
+  const toasts: string[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  const r1 = await $.prompt.submit({ text: '컨텍스트 좀 압축해 줘', wait: false, origin: { kind: 'composer' } })
+  await $.prompt.submit({ text: '대화 압축해 줘', wait: false, origin: { kind: 'composer' } })
+  await $.prompt.submit({ text: '로그인 화면 만들어 줘', wait: false, origin: { kind: 'composer' } })
+  expect('text' in r1 && r1.text).toBe('컨텍스트 좀 압축해 줘')
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toMatch(/^팁: \/compact 명령으로 바로 할 수 있습니다\. 대화를 요약해/)
+})
+
+test('/ 메뉴: 엔진 내장 명령의 설명만 한국어로 바꾼다', async ($, on) => {
+  on('command.describe', (_, e) => ({ description: e.description, isHidden: e.isHidden }))
+  const core = await $.command.describe({ command: 'compact', description: 'Free up context', isHidden: false, immediate: false, provider: { plugin: 'engine', tier: 'core' } } as never)
+  const other = await $.command.describe({ command: 'compact', description: 'Mine', isHidden: false, immediate: false, provider: { plugin: 'someone', tier: 'user' } } as never)
+  expect(core.description).toMatch(/^대화를 요약해/)
+  expect(other.description).toBe('Mine')
+})
