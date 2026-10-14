@@ -6,6 +6,8 @@ import { promptsFromTranscript } from '../hooks/prompts'
 import { unfence } from '../hooks/replies'
 import { bar, kTokens, limitView, untilText, usdText, viewOf } from '../hooks/meter'
 import { SYNC_STALE_MS, parseSyncStatus, syncView } from '../hooks/sync'
+import { keyGroupsFor, platformOf } from '../hooks/catalog'
+import type { Platform } from '../hooks/catalog'
 
 const band = (bodyColumns: number) =>
   ({
@@ -589,4 +591,54 @@ test('/ 메뉴: 엔진 내장 명령의 설명만 한국어로 바꾼다', async
   const other = await $.command.describe({ command: 'compact', description: 'Mine', isHidden: false, immediate: false, provider: { plugin: 'someone', tier: 'user' } } as never)
   expect(core.description).toMatch(/^대화를 요약해/)
   expect(other.description).toBe('Mine')
+})
+
+test('[단축키]는 OS에 맞는 키를 보인다: macOS는 Option 키·이미지 붙여넣기 Ctrl+V, OS는 환경 변수로 가린다', async () => {
+  expect(platformOf({ os: 'Windows_NT', cfEncoding: '0x0:3:51' })).toBe('windows')
+  expect(platformOf({ cfEncoding: '0x0:3:51' })).toBe('mac')
+  expect(platformOf({})).toBe('linux')
+  const keysOf = (platform: Platform) => keyGroupsFor(platform).flatMap(group => group.entries)
+  const win = keysOf('windows')
+  const mac = keysOf('mac')
+  const linux = keysOf('linux')
+  // Windows는 적은 그대로
+  expect(win.find(k => k.command === 'model')?.keys).toBe('Alt+P')
+  expect(win.some(k => k.keys === 'Alt+V')).toBe(true)
+  // macOS: Option 키, 이미지 붙여넣기는 Ctrl+V(iTerm2는 Cmd+V), Windows에만 맞는 Alt+M 안내는 뺀다
+  expect(mac.find(k => k.command === 'model')?.keys).toBe('Option+P')
+  expect(mac.find(k => k.command === 'fast')?.keys).toBe('Option+O')
+  expect(mac.some(k => k.keys === 'Option+T')).toBe(true)
+  expect(mac.some(k => k.keys.startsWith('Alt+'))).toBe(false)
+  expect(mac.find(k => k.keys === 'Ctrl+V')?.ko).toContain('iTerm2')
+  expect(mac.find(k => k.keys === 'Shift+Tab')?.ko).not.toContain('Alt+M')
+  // Linux: Alt는 그대로, 이미지 붙여넣기만 Ctrl+V
+  expect(linux.find(k => k.command === 'model')?.keys).toBe('Alt+P')
+  expect(linux.some(k => k.keys === 'Ctrl+V')).toBe(true)
+  // OS마다 줄 수는 같다(바꾸기만 하고 빼거나 더하지 않는다)
+  expect(mac.length).toBe(win.length)
+  expect(linux.length).toBe(win.length)
+})
+
+test('[sessions]는 /sessions를 거치지 않고 세션 패널을 바로 연다(답변 중에도 줄 서지 않게)', async ($, on) => {
+  const opened: string[] = []
+  const ran: string[] = []
+  on('clock.now', () => ({ value: 0 }))
+  on('store.get', () => ({ value: undefined }))
+  on('command.list', () => ({ value: [{ name: 'sessions', description: '세션 패널', source: 'builtin' as const }] }))
+  on('command.run', (_, e) => {
+    ran.push(e.command)
+    return { text: '' }
+  })
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  // 명령 목록은 팔레트를 열 때 읽는다. /sessions가 있어야 [sessions]가 생긴다
+  await $.command.run({ command: 'palette', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const ui = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(120) })
+  await ui.press({ key: 'band-sessions' })
+  await ui.unmount()
+  expect(opened).toContain('session-tracker-panel')
+  expect(ran).not.toContain('sessions')
 })

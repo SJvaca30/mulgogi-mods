@@ -7,8 +7,14 @@ import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
 import type { SessionRecord } from '../types'
 
 const NOW = Date.parse('2026-10-11T05:00:00Z')
-// 엔진은 경로 구분자를 바꿔 넘기므로, 대역에서는 소문자와 /로 맞춰 비교한다
-const norm = (path: string) => path.split('\\').join('/').toLowerCase()
+// 엔진은 경로 구분자를 바꿔 넘기므로, 대역에서는 소문자와 /로 맞춰 비교한다.
+// macOS·Linux 엔진은 'C:/…'를 상대 경로로 보고 현재 폴더 뒤에 붙여 넘기므로, 'c:/' 앞에 붙은 것은 떼고 비교한다(2026-10-14)
+const norm = (path: string) => {
+  const p = path.split('\\').join('/').toLowerCase()
+  const at = p.indexOf('c:/')
+
+  return at > 0 ? p.slice(at) : p
+}
 const rec = (over: Partial<SessionRecord>): SessionRecord => ({
   id: 'other',
   root: 'D:\\all',
@@ -179,17 +185,23 @@ const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isSt
 const entry = (name: string, kind: 'file' | 'dir', mtimeMs = NOW, size = 100) => ({ name, kind, size, mtimeMs, isLink: false })
 
 // 세션 패널 테스트의 엔진 자리: 기록 폴더 목록, history.jsonl, $.store, claude agents, 제목 도우미(pwsh), Orca를 흉내 낸다.
-// liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다
-function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set()) {
+// liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다. noOrca면 orca 명령이 없는 일반 터미널, root는 이 세션의 폴더
+function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string } = {}) {
   const ran: string[][] = []
+  const copies: string[] = []
   const toasts: string[] = []
   const commands: { command: string; args?: string }[] = []
   const store = new Map<string, unknown>()
   on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? 'C:/Users/me/.claude/jobs/abc12345' : undefined }))
-  on('session.root', () => ({ value: 'D:\\all' }))
+  on('session.root', () => ({ value: opts.root ?? 'D:\\all' }))
   on('session.id', () => ({ value: 'me' }))
   on('clock.now', () => ({ value: NOW }))
   on('clock.sleep', () => ({ value: undefined }))
+  on('ui.copy', (_, e) => {
+    copies.push(e.text)
+    return { value: { isCopied: true as const } }
+  })
+  on('ui.close', () => ({ value: undefined }))
   // [끄기]의 5초 타이머는 테스트 안에서 끝나지 않게 둔다(바로 끝내면 한 번 누른 상태가 곧장 풀린다)
   on('clock.after', () => new Promise<never>(() => undefined))
   on('clock.every', () => ({ value: undefined }))
@@ -239,6 +251,7 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
   on('process.run', (_, e) => {
     const argv = [...e.argv]
     ran.push(argv)
+    if (opts.noOrca && argv[0] === 'orca') return { value: { exitCode: 127, stdout: '', stderr: 'orca: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
     if (argv[0] === 'claude' && argv[1] === 'agents') {
       if (argv.includes('--all')) return ok(AGENTS_JSON)
       const fresh = JSON.parse(AGENTS_JSON).filter((r: { pid?: number }) => r.pid !== undefined)
@@ -257,7 +270,7 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
     return ok('{}')
   })
 
-  return { ran, toasts, commands, store }
+  return { ran, toasts, commands, store, copies }
 }
 
 async function openPanel($: Parameters<TestBody>[0]) {
@@ -471,5 +484,64 @@ test('세션 패널: 이름을 눌러 고치고, 다른 세션은 그 Orca 탭�
   await ui.press({ key: 'agent-manage-30a5238d-1' })
   expect(await ui.find({ key: 'agent-stop-30a5238d-1' })).toBeUndefined()
   expect(await ui.find({ key: 'agent-rename-menu-30a5238d-1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Orca가 없으면: [이동]·[열기]는 여기서 열기(/resume)와 명령 복사를 펴고, 다른 창의 대화형 세션과 다른 대화의 이름은 누를 수 없다', async ($, on) => {
+  const host = panelHost(on, new Set(), { noOrca: true })
+  const ui = await openPanel($)
+  expect(host.ran).toContainEqual(['orca', '--version'])
+  // 다른 창에서 켜진 대화형 세션: 여기서 열면 두 터미널의 메시지가 섞이므로 버튼 없이 표시만 한다
+  expect(await ui.find({ key: 'agent-go-7148776f-1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '다른 창' })).toBeDefined()
+  // 다른 대화의 이름은 Orca 탭에 /rename을 대신 칠 수 없어 누를 수 없고, 이 대화는 그대로 고친다
+  expect(await ui.find({ key: 'agent-rename-7148776f-1' })).toBeUndefined()
+  expect(await ui.find({ key: 'agent-rename-me' })).toBeDefined()
+  // 켜진 백그라운드 세션: 다른 폴더여도 여기서 열 수 있고(/resume이 붙여 준다), 복사하면 claude attach
+  await ui.press({ key: 'agent-go-2561affb-1' })
+  expect(await ui.find({ key: 'agent-here-2561affb-1' })).toBeDefined()
+  await ui.press({ key: 'agent-copy-2561affb-1' })
+  // 꺼진 대화: 기록만 남은 것은 그 폴더로 가서 --resume, 멈춘 백그라운드 세션은 attach
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  await ui.press({ key: 'agent-copy-83b9eb02-1' })
+  await ui.press({ key: 'agent-open-30a5238d-1' })
+  await ui.press({ key: 'agent-copy-30a5238d-1' })
+  expect(host.copies).toEqual(['claude attach 2561affb', 'cd "D:\\all" && claude --resume 83b9eb02-1', 'claude attach 30a5238d'])
+  // 같은 폴더의 꺼진 대화를 여기서 열면, 그사이 켜졌는지 확인한 뒤 /resume <id>
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  await ui.press({ key: 'agent-here-83b9eb02-1' })
+  expect(host.ran).toContainEqual(['claude', 'agents', '--json'])
+  expect(host.commands).toContainEqual({ command: 'resume', args: '83b9eb02-1' })
+  // orca는 있는지 확인할 때 말고는 부르지 않는다
+  expect(host.ran.filter(argv => argv[0] === 'orca')).toEqual([['orca', '--version']])
+  await ui.unmount()
+})
+
+test('Orca가 없을 때 다른 폴더의 꺼진 대화는 여기서 열지 않고 명령 복사만 둔다', async ($, on) => {
+  const host = panelHost(on, new Set(), { noOrca: true, root: 'D:\\elsewhere' })
+  const ui = await openPanel($)
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  expect(await ui.find({ key: 'agent-here-83b9eb02-1' })).toBeUndefined()
+  expect(await ui.find({ key: 'agent-copy-83b9eb02-1' })).toBeDefined()
+  // 켜진 백그라운드 세션은 폴더와 상관없이 여기서 연다
+  await ui.press({ key: 'agent-go-96394c1c-1' })
+  await ui.press({ key: 'agent-here-96394c1c-1' })
+  expect(host.commands).toContainEqual({ command: 'resume', args: '96394c1c-1' })
+  await ui.unmount()
+})
+
+test('다른 mod(clickbar [sessions])가 세션 패널을 직접 열어도 목록을 읽는다', async ($, on) => {
+  const host = panelHost(on)
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  // /sessions를 거치지 않고 패널이 그려진다(다른 mod가 $.ui.open으로 연 경우)
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'session-tracker-panel',
+    props: { title: '세션', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  })
+  expect(host.ran).toContainEqual(['claude', 'agents', '--json', '--all'])
+  expect(await ui.find({ key: 'agent-open-83b9eb02-1' })).toBeDefined()
   await ui.unmount()
 })

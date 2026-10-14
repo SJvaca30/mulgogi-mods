@@ -79,6 +79,10 @@ declare module 'claude-code' {
       renameDraft: string
       /** [끄기]를 한 번 누른 세션의 sessionId. 한 번 더 누르면 끈다. 아니면 '' */
       stopArmed: string
+      /** orca 명령을 쓸 수 있는지. 없으면(일반 터미널) [이동]·다른 대화 이름 고치기 대신 /resume·명령 복사를 보인다 */
+      orcaReady: boolean
+      /** Orca 없이 [열기]·[이동]을 누른 대화의 sessionId(그 줄 아래에 여기서 열기·명령 복사가 열림), 아니면 '' */
+      opening: string
     }
   }
 }

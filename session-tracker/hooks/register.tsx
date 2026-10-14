@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TitleEntry, ViewMode } from '../types'
 import { cleanName, composerHasText, findTerminal, kindWord, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
@@ -13,6 +13,8 @@ import {
   isScratchProject,
   orcaHasPath,
   parseHistory,
+  pathKey,
+  reopenCommand,
   parseIdList,
   parseTitleScan,
   parseView,
@@ -38,6 +40,8 @@ const selfKind = atom({ plugin: 'session-tracker', key: 'selfKind' } as const, '
 const renaming = atom({ plugin: 'session-tracker', key: 'renaming' } as const, '')
 const renameDraft = atom({ plugin: 'session-tracker', key: 'renameDraft' } as const, '')
 const stopArmed = atom({ plugin: 'session-tracker', key: 'stopArmed' } as const, '')
+const orcaReady = atom({ plugin: 'session-tracker', key: 'orcaReady' } as const, false)
+const opening = atom({ plugin: 'session-tracker', key: 'opening' } as const, '')
 // 다른 세션이 /rename을 처리할 때까지 기다리는 시간, [끄기]를 한 번 누른 뒤 두 번째 누름을 기다리는 시간
 const RENAME_SETTLE_MS = 1500
 const STOP_CONFIRM_MS = 5000
@@ -333,12 +337,7 @@ async function restoreItem($: EngineInterface, item: SessionItem) {
  */
 async function openOff($: EngineInterface, item: SessionItem) {
   try {
-    const fresh = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 20_000 })
-    if (fresh.exitCode === 0 && parseAgents(fresh.stdout, '').some(r => r.sessionId === item.sessionId && r.isLive)) {
-      $.ui.toast(`"${item.name}"은 그사이 켜져 있어 다시 열지 않았습니다. 목록을 새로 읽습니다`)
-      await refreshPanel($)
-      return
-    }
+    if (await isLiveNow($, item)) return
     if (!(await $.fs.exists(item.cwd))) {
       $.ui.toast(`이 대화의 폴더가 이 PC에 없습니다: ${item.cwd}`, { timeoutMs: 10000 })
       return
@@ -364,6 +363,57 @@ async function openOff($: EngineInterface, item: SessionItem) {
   }
   await $.clock.sleep(RENAME_SETTLE_MS)
   await refreshPanel($)
+}
+
+// 목록은 15초마다 읽으므로, 꺼진 대화를 열기 직전에 그사이 켜졌는지 한 번 더 본다(두 터미널이 같은 기록에 쓰면 메시지가 섞인다)
+async function isLiveNow($: EngineInterface, item: SessionItem) {
+  const fresh = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 20_000 })
+  if (fresh.exitCode !== 0 || !parseAgents(fresh.stdout, '').some(r => r.sessionId === item.sessionId && r.isLive)) return false
+  $.ui.toast(`"${item.name}"은 그사이 켜져 있어 다시 열지 않았습니다. 목록을 새로 읽습니다`)
+  await refreshPanel($)
+
+  return true
+}
+
+// orca 명령을 쓸 수 있는지 세션마다 한 번 본다. Orca 안(ORCA_PANE_KEY)이면 묻지 않고, 밖이면 orca --version으로 본다.
+// 없으면 일반 터미널이라 [이동]·다른 대화 이름 고치기 대신 /resume·명령 복사를 보인다
+async function checkOrca($: EngineInterface) {
+  let ready = (await $.env.get('ORCA_PANE_KEY')) !== undefined
+  if (!ready) {
+    try {
+      ready = (await $.process.run(['orca', '--version'], { timeoutMs: 5_000 })).exitCode === 0
+    } catch {
+      ready = false
+    }
+  }
+  await update($, orcaReady, () => ready)
+}
+
+// Orca 없이 그 대화를 이 터미널에서 연다(내장 /resume <id>). 꺼진 대화는 기록을 불러오고, 켜진 백그라운드 세션은
+// 지금 대화를 백그라운드로 보내고 이 터미널을 그 세션에 붙인다(Claude Code 2.1.285부터, ←로 agent view에 돌아온다).
+// $.command.run은 답변이 끝날 때까지 기다리므로, 일하는 중이면 그 뒤에 열린다
+async function openHere($: EngineInterface, item: SessionItem) {
+  await update($, opening, () => '')
+  try {
+    if (item.kind === 'off' && (await isLiveNow($, item))) return
+    if (self?.record.status === 'working') $.ui.toast(`답변이 끝나면 "${item.name}"을(를) 이 터미널에서 엽니다`)
+    await $.ui.close({ id: PANE })
+    await $.command.run({ command: 'resume', args: item.sessionId })
+  } catch (error) {
+    $.ui.toast(`/resume으로 열지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+// 새 터미널 탭에 붙여 넣을 명령을 복사한다. Orca가 없으면 다른 탭을 대신 열 수 없어서다
+async function copyCommand($: EngineInterface, item: SessionItem, surface: RenderSurface) {
+  await update($, opening, () => '')
+  const text = reopenCommand(item)
+  try {
+    const done = await $.ui.copy({ text, surface })
+    $.ui.toast(done.isCopied ? `명령을 복사했습니다. 새 터미널 탭에서 붙여 넣으세요: ${text}` : `복사하지 못했습니다. 새 탭에서 직접 치세요: ${text}`, { timeoutMs: 12000 })
+  } catch {
+    $.ui.toast(`복사하지 못했습니다. 새 탭에서 직접 치세요: ${text}`, { timeoutMs: 12000 })
+  }
 }
 
 // 설정 저장소(CCsetting)의 sync.ps1 위치. 저장소 위치는 ~/.claude/sync-config.json, 없으면 ~/CCsetting.
@@ -563,6 +613,7 @@ export const register: Register = on => {
       const jobDir = await $.env.get('CLAUDE_JOB_DIR')
       await update($, selfKind, () => (jobDir !== undefined && jobDir !== '' ? 'background' : 'interactive'))
     })
+    await safely($, 'Orca 확인', () => checkOrca($))
     $.clock.every(HEARTBEAT_MS, () => void safely($, '살아 있음 기록', () => save($)))
     $.clock.every(REFRESH_MS, () => void safely($, '다른 세션 읽기', () => refresh($)))
     $.clock.every(REFRESH_MS, () => void (panelOpen ? refreshPanel($) : undefined))
@@ -651,6 +702,7 @@ export const register: Register = on => {
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     panelOpen = false
+    await update($, opening, () => '')
     // 패널을 닫으면 고치던 이름, 한 번 누른 [끄기], 열어 둔 [관리], 보관함 보기는 없던 일로 한다
     await update($, renaming, () => '')
     await update($, stopArmed, () => '')
@@ -661,6 +713,12 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    // clickbar의 [sessions]처럼 다른 mod가 이 패널을 직접 열면 /sessions를 거치지 않아 목록을 읽지 않았다.
+    // 처음 그릴 때 읽기 시작한다. 그래야 답변 중에도 패널이 바로 뜬다($.command.run은 답변이 끝날 때까지 기다린다)
+    if (!panelOpen) {
+      panelOpen = true
+      void refreshPanel($)
+    }
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     // 입력칸이 없는 화면에서는 이름 고치기를 /rename 안내로 대신한다
@@ -679,6 +737,11 @@ export const register: Register = on => {
     const pinned = await read($, pins)
     const hidden = await read($, archived)
     const inArchive = await read($, showArchived)
+    // Orca가 없으면(일반 터미널) 다른 탭으로 옮기거나 다른 대화의 입력창에 대신 칠 수 없어, 줄 첫 칸과 이름 고치기를 바꿔 그린다
+    const hasOrca = await read($, orcaReady)
+    const openingId = await read($, opening)
+    // 꺼진 대화를 이 터미널에서 열 수 있는지(같은 폴더인지) 볼 때 쓰는 이 세션의 폴더
+    const here = self === undefined ? '' : pathKey(self.record.root)
     const now = await $.clock.now()
     const counts = stateCounts(live)
     const offCount = items.filter(it => it.kind === 'off').length
@@ -711,13 +774,34 @@ export const register: Register = on => {
             () => void togglePin($, it.sessionId).then(closeManage),
             isPinned ? 'warning' : 'suggestion',
           )}
-          {it.kind !== 'off' && button(`agent-rename-menu-${it.sessionId}`, '이름 고치기', () => void closeManage().then(() => startRename($, it)))}
+          {it.kind !== 'off' && (hasOrca || it.isSelf) && button(`agent-rename-menu-${it.sessionId}`, '이름 고치기', () => void closeManage().then(() => startRename($, it)))}
           {!it.isSelf && button(`agent-archive-${it.sessionId}`, '보관', () => void archiveItem($, it).then(closeManage))}
           {/* 다 쓴 백그라운드 세션을 끈다. 이 대화는 /stop, 포그라운드 세션은 그 탭을 닫아 끈다 */}
           {it.kind === 'background' &&
             !it.isSelf &&
             button(`agent-stop-${it.sessionId}`, isArmed ? '정말 끄기' : '끄기', () => void pressStop($, it, isArmed), isArmed ? 'error' : 'suggestion', isArmed)}
           {it.isSelf && <Text dimColor>이 대화는 보관·끄기 대신 /stop</Text>}
+        </Box>
+      )
+    }
+
+    // Orca가 없을 때 [열기]·[이동]을 누르면 그 줄 아래에 여는 방법을 편다. 켜진 백그라운드 세션과 같은 폴더의 꺼진 대화는
+    // 이 터미널에서 열 수 있고(/resume), 다른 폴더의 꺼진 대화는 그 폴더로 가는 명령을 복사한다(Claude Code의 /resume 목록도 그렇게 한다)
+    const toggleOpening = (it: SessionItem) => update($, opening, old => (old === it.sessionId ? '' : it.sessionId))
+    const openLine = (it: SessionItem) => {
+      const canHere = it.kind === 'background' || (here !== '' && pathKey(it.cwd) === here)
+
+      return (
+        <Box key={`opening-${it.sessionId}`} paddingLeft={COL_ACTION + 1} columnGap={1} flexWrap="wrap">
+          {canHere && button(`agent-here-${it.sessionId}`, '여기서 열기', () => void openHere($, it))}
+          {button(`agent-copy-${it.sessionId}`, '명령 복사', () => void copyCommand($, it, e.surface))}
+          <Text dimColor>
+            {it.kind === 'background'
+              ? '여기서 열면 지금 대화는 백그라운드로 옮겨지고 이 터미널이 그 세션에 붙습니다(←로 돌아옴) · 복사하면 새 탭에서 붙습니다'
+              : canHere
+                ? '여기서 열면 이 터미널이 그 대화로 바뀝니다(지금 대화는 기록이 남음) · 복사하면 새 탭에서 엽니다'
+                : '다른 폴더의 대화라 새 탭에서 엽니다. 명령을 복사해 붙여 넣으세요'}
+          </Text>
         </Box>
       )
     }
@@ -736,9 +820,14 @@ export const register: Register = on => {
                   이 대화
                 </Text>
               ) : isOff ? (
-                button(`agent-open-${it.sessionId}`, '열기', () => void openOff($, it))
-              ) : (
+                button(`agent-open-${it.sessionId}`, '열기', () => void (hasOrca ? openOff($, it) : toggleOpening(it)))
+              ) : hasOrca ? (
                 button(`agent-go-${it.sessionId}`, '이동', () => void switchTo($, it))
+              ) : it.kind === 'background' ? (
+                button(`agent-go-${it.sessionId}`, '이동', () => void toggleOpening(it))
+              ) : (
+                // 다른 창에서 켜진 대화형 세션: 여기서 열면 두 터미널의 메시지가 한 기록에 섞이므로 버튼을 두지 않는다
+                <Text dimColor>다른 창</Text>
               )}
             </Box>
             <Box width={COL_STATE} flexShrink={0}>
@@ -765,7 +854,8 @@ export const register: Register = on => {
               <Box flexGrow={1} flexShrink={1} columnGap={1}>
                 {/* 이름 칸이 남는 폭을 모두 차지해 폴더 이름이 늘 [관리] 바로 앞에 맞춰 선다 */}
                 <Box flexGrow={1} flexShrink={1}>
-                  {isOff ? (
+                  {/* Orca가 없으면 다른 대화의 입력창에 /rename을 대신 칠 수 없어 이름을 누를 수 없게 둔다 */}
+                  {isOff || (!hasOrca && !it.isSelf) ? (
                     <Text>{it.name}</Text>
                   ) : (
                     <Button key={`agent-rename-${it.sessionId}`} plain label={`${it.name} (이름 고치기)`} onPress={() => void startRename($, it)}>
@@ -790,6 +880,7 @@ export const register: Register = on => {
             </Box>
           </Box>
           {isManaged && !inArchive && manageLine(it)}
+          {openingId === it.sessionId && !hasOrca && !inArchive && openLine(it)}
         </Box>
       )
     }
@@ -903,6 +994,11 @@ export const register: Register = on => {
             <Text dimColor>백그라운드: 탭을 닫아도 켜져 있음 · 포그라운드: 탭을 닫으면 꺼짐 · 유휴: 꺼져 있고 기록만 남음([열기]로 다시 켬)</Text>
             <Text dimColor>밑줄 친 이름을 누르면 바로 고칩니다(켜진 대화만) · [관리]: 고정·보관·끄기([끄기]는 두 번 눌러야 끔)</Text>
             <Text dimColor>목록은 15초마다 새로 읽습니다 · 고정·보관·보기 설정은 이 PC에만 저장 · [resume] 목록에서 Ctrl+A는 모든 폴더</Text>
+            {!hasOrca && (
+              <Text dimColor>
+                Orca가 없어 다른 탭으로 옮기지 못합니다: [열기]·[이동]은 이 터미널에서 열거나(/resume) 새 탭용 명령을 복사합니다 · 다른 창의 대화는 그 창에서 쓰고 이름도 그 창에서 /rename
+              </Text>
+            )}
           </Box>
         )}
       </Box>

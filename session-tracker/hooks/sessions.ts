@@ -145,7 +145,7 @@ export function buildItems(input: {
 const LIVE_RANK: Record<string, number> = { blocked: 0, working: 1, busy: 1 }
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
 
-const pathKey = (p: string) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+export const pathKey = (p: string) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
 
 function dayKey(at: number): string {
   const d = new Date(at)
@@ -218,6 +218,16 @@ export function arrange(
   }
 
   return { pinned, groups: list }
+}
+
+/**
+ * Orca 없이 새 터미널 탭에 붙여 넣을 명령. 백그라운드 세션(켜져 있거나 멈춘 것)은 id로 붙고,
+ * 기록만 남은 대화는 그 폴더로 가서 다시 연다(cd 없이 열면 지금 폴더의 대화로 열린다)
+ */
+export function reopenCommand(item: Pick<SessionItem, 'cwd' | 'sessionId' | 'shortId' | 'reopen' | 'kind'>): string {
+  if (item.kind === 'background' || item.reopen === 'attach') return `claude attach ${item.shortId || item.sessionId}`
+
+  return `cd "${item.cwd}" && claude --resume ${item.sessionId}`
 }
 
 /** orca worktree list --json 결과에 이 폴더가 있는지. 없는 폴더에는 Orca 탭을 열 수 없다 */

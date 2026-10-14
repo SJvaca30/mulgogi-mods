@@ -109,9 +109,27 @@ export const NEEDS_ARGS = new Set(['btw', 'cd', 'stop', 'exit'])
 export const KO = new Map(GROUPS.flatMap(group => group.entries.map(entry => [entry.name, entry.ko] as const)))
 
 // 기본 단축키(~/.claude/keybindings.json이 없어 기본값 그대로다).
-// 출처: https://code.claude.com/docs/en/interactive-mode (2026-10-09 확인). 목록 초안은 사본 세션의 v0.3 시안에서 가져왔다.
+// 출처: https://code.claude.com/docs/en/interactive-mode (2026-10-09 확인, macOS 키는 2026-10-14 확인). 목록 초안은 사본 세션의 v0.3 시안에서 가져왔다.
 // mod는 키를 대신 눌러 줄 수 없다. 그 키와 같은 일을 하는 명령이 있을 때만 command를 단다.
-export type KeyEntry = { keys: string; ko: string; command?: string }
+// keys·ko는 Windows 기준이다. macOS·Linux에서 키나 설명이 다르면 mac·linux에 다른 것만 적는다
+export type Platform = 'windows' | 'mac' | 'linux'
+type KeyText = { keys?: string; ko?: string }
+export type KeyEntry = { keys: string; ko: string; command?: string; mac?: KeyText; linux?: KeyText }
+
+// 엔진은 OS를 알려 주지 않아 환경 변수로 가린다. Windows에는 늘 OS=Windows_NT가, macOS에는 __CF_USER_TEXT_ENCODING이 있다
+export function platformOf(env: { os?: string; cfEncoding?: string }): Platform {
+  if (env.os === 'Windows_NT') return 'windows'
+
+  return env.cfEncoding !== undefined ? 'mac' : 'linux'
+}
+
+// 이 OS에서 보일 단축키 목록. mac·linux에 적은 것만 바꾸고 나머지는 그대로 둔다
+export function keyGroupsFor(platform: Platform) {
+  return KEY_GROUPS.map(group => ({
+    title: group.title,
+    entries: group.entries.map(({ mac, linux, ...entry }) => ({ ...entry, ...(platform === 'mac' ? mac : platform === 'linux' ? linux : undefined) })),
+  }))
+}
 
 export const KEY_GROUPS: { title: string; entries: KeyEntry[] }[] = [
   // 출처: 엔진 타입 2.1.295의 AbovePrompt 설명("collapses it (ctrl+x ctrl+a, [-]) or focuses it (a click, ctrl+x tab)").
@@ -129,7 +147,7 @@ export const KEY_GROUPS: { title: string; entries: KeyEntry[] }[] = [
       { keys: 'Esc', ko: 'Claude를 멈추고 방향을 바꾼다. 한 작업은 남는다. 열린 대화상자는 닫는다' },
       { keys: 'Ctrl+B', ko: '실행 중인 Bash 명령과 에이전트를 백그라운드로 보낸다' },
       { keys: 'Ctrl+X Ctrl+K', ko: '백그라운드 서브에이전트를 모두 멈춘다 (3초 안에 두 번)' },
-      { keys: 'Ctrl+Enter', ko: '대기 중인 메시지를 지금 바로 보낸다 (Ctrl+X Ctrl+S도 같다)' },
+      { keys: 'Ctrl+Enter', ko: '대기 중인 메시지를 지금 바로 보낸다 (Ctrl+X Ctrl+S도 같다. 터미널이 Ctrl+Enter를 Enter로만 넘기면 Ctrl+X Ctrl+S)' },
       { keys: 'Ctrl+C', ko: '일하는 중이면 중단하고, 아니면 입력을 지운다. 빈 입력에서 한 번 더 누르면 종료' },
     ],
   },
@@ -146,11 +164,26 @@ export const KEY_GROUPS: { title: string; entries: KeyEntry[] }[] = [
   {
     title: '모드 · 모델',
     entries: [
-      { keys: 'Shift+Tab', ko: '권한 모드를 돌아가며 바꾼다: Manual → acceptEdits → plan … (Windows에서 안 되면 Alt+M)' },
-      { keys: 'Alt+P', ko: '입력을 지우지 않고 모델을 바꾼다', command: 'model' },
-      { keys: 'Alt+T', ko: '확장 사고를 켜고 끈다. Opus 5.5 등은 항상 켜져 있어 효과가 없다' },
+      {
+        keys: 'Shift+Tab',
+        ko: '권한 모드를 돌아가며 바꾼다: Manual → acceptEdits → plan … (Windows에서 안 되면 Alt+M)',
+        mac: { ko: '권한 모드를 돌아가며 바꾼다: Manual → acceptEdits → plan …' },
+        linux: { ko: '권한 모드를 돌아가며 바꾼다: Manual → acceptEdits → plan …' },
+      },
+      // macOS의 Option 조합은 터미널이 Option을 Alt(Meta)로 넘겨야 된다. Option+T만 그 설정 없이 된다(공식 문서)
+      {
+        keys: 'Alt+P',
+        ko: '입력을 지우지 않고 모델을 바꾼다',
+        command: 'model',
+        mac: { keys: 'Option+P', ko: '입력을 지우지 않고 모델을 바꾼다. 터미널이 Option을 Alt로 넘겨야 된다(Orca: 설정 → Terminal → Option as Alt)' },
+      },
+      {
+        keys: 'Alt+T',
+        ko: '확장 사고를 켜고 끈다. Opus 5.5 등은 항상 켜져 있어 효과가 없다',
+        mac: { keys: 'Option+T', ko: '확장 사고를 켜고 끈다. Opus 5.5 등은 항상 켜져 있어 효과가 없다. Option 설정 없이도 된다' },
+      },
       // 단가 출처: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08 확인)
-      { keys: 'Alt+O', ko: 'fast 모드를 켜고 끈다. Opus 5.5에서 토큰 단가가 2배다 (입력·출력 $8·$40, 보통 $4·$20)', command: 'fast' },
+      { keys: 'Alt+O', ko: 'fast 모드를 켜고 끈다. Opus 5.5에서 토큰 단가가 2배다 (입력·출력 $8·$40, 보통 $4·$20)', command: 'fast', mac: { keys: 'Option+O' } },
     ],
   },
   {
@@ -175,7 +208,7 @@ export const KEY_GROUPS: { title: string; entries: KeyEntry[] }[] = [
     title: '입력',
     entries: [
       { keys: 'Ctrl+G', ko: '입력을 기본 텍스트 편집기에서 편집한다' },
-      { keys: 'Alt+V', ko: '클립보드 이미지를 붙여 넣는다 (Windows)' },
+      { keys: 'Alt+V', ko: '클립보드 이미지를 붙여 넣는다', mac: { keys: 'Ctrl+V', ko: '클립보드 이미지를 붙여 넣는다 (iTerm2는 Cmd+V)' }, linux: { keys: 'Ctrl+V' } },
       { keys: '!', ko: '맨 앞에 쓰면 셸 모드: 명령을 바로 실행하고 결과를 대화에 넣는다' },
       { keys: '@', ko: '파일 경로를 자동 완성한다' },
       { keys: 'Ctrl+W · K · U', ko: '앞 단어 / 줄 끝까지 / 줄 처음까지 지운다. Ctrl+Y로 지운 글을 붙여 넣는다' },

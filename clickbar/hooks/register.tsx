@@ -3,7 +3,8 @@ import type { EngineInterface, PromptFilled, Register, RenderSurface, SessionCon
 
 import { addDelta, cardText, editDelta, whenText } from './card'
 import type { FileDelta } from './card'
-import { DEFAULT_FAVORITES, GROUPS, KEY_GROUPS, KO, NEEDS_ARGS, TIPS } from './catalog'
+import { DEFAULT_FAVORITES, GROUPS, KO, NEEDS_ARGS, TIPS, keyGroupsFor, platformOf } from './catalog'
+import type { Platform } from './catalog'
 import type { Assumption, Idea, PaletteTab, PromptEntry } from '../types'
 import { ASSUME_DESCRIPTION, ASSUME_SCHEMA, ASSUME_SWITCH_KEY, ASSUME_TOOL_MATCH, ASSUME_TOOL_NAME, assumptionTexts, correctionPrompt } from './assumptions'
 import { bar, kTokens, limitView, usdText, viewOf } from './meter'
@@ -12,6 +13,8 @@ import { finalReplies, previewLine, unfence } from './replies'
 import { parseSyncStatus, syncView } from './sync'
 
 const PANE = 'clickbar-palette'
+// session-tracker의 세션 패널 id. [sessions]는 이 패널을 직접 연다(openSessions)
+const SESSIONS_PANE = 'session-tracker-panel'
 // 폭이 이보다 좁으면 tasks·fork는 [palette]에서만 열고, 한도는 경고 수준일 때만, API 환산액은 숨긴다
 const WIDE_COLUMNS = 110
 // 팔레트 명령 줄의 열 폭(글자 칸): [/security-review]까지 한 줄에 들어가는 명령 열, [넣기] [고정] 버튼 열
@@ -47,6 +50,8 @@ const TIPS_SWITCH_KEY = 'tips'
 const assumptions = atom({ plugin: 'clickbar', key: 'assumptions' } as const, [])
 const syncStatus = atom({ plugin: 'clickbar', key: 'syncStatus' } as const, null)
 
+// [단축키] 탭이 보일 키의 OS. 세션을 시작할 때 환경 변수로 정한다(못 읽으면 목록을 적은 기준인 Windows)
+let platform: Platform = 'windows'
 let thresholdModel: string | undefined
 // 마지막 측정값. 턴을 시작할 때 이 값을 복사해 두고 턴이 끝날 때의 값과 비교한다
 let latest: { tokens: number | null; usd: number | null } = { tokens: null, usd: null }
@@ -324,6 +329,17 @@ async function toggleFavorite($: EngineInterface, name: string) {
   await $.store.set('favorites', list)
 }
 
+// session-tracker의 세션 패널을 직접 연다. /sessions를 $.command.run으로 부르면 엔진이 사람이 친 명령처럼 다뤄
+// 답변이 끝날 때까지 줄을 세우므로(immediate는 사람이 직접 친 명령에만 듣는다), 답변 중에도 바로 뜨게 패널을 연다.
+// 목록 읽기는 session-tracker가 이 패널이 열리는 것(ui.open)을 받아서 한다
+async function openSessions($: EngineInterface) {
+  try {
+    await $.ui.open({ id: SESSIONS_PANE, title: '세션', focus: true, closeOnEscape: true })
+  } catch {
+    await run($, 'sessions')
+  }
+}
+
 async function openPalette($: EngineInterface) {
   await loadCommands($)
   // 탭은 기억하되 검색어는 비운다. 지난 검색어가 남으면 목록이 걸러진 채 열려 명령이 없어 보인다
@@ -365,6 +381,11 @@ export const register: Register = on => {
       await $.tool.register({ name: ASSUME_TOOL_NAME, description: ASSUME_DESCRIPTION, inputSchema: ASSUME_SCHEMA, isDeferred: false })
     }
     await loadFavorites($)
+    try {
+      platform = platformOf({ os: await $.env.get('OS'), cfEncoding: await $.env.get('__CF_USER_TEXT_ENCODING') })
+    } catch {
+      // 환경 변수를 못 읽으면 Windows 기준 목록을 그대로 보인다
+    }
     // 다른 플러그인이 자기 명령을 등록할 시간을 준 뒤 읽는다 (quickbar와 같은 방식)
     $.clock.after(1500, () => void loadCommands($).then(() => refreshMeter($)).then(() => seedUsage($)).then(() => loadIdeas($)).then(() => refreshStatus($)).then(() => loadSyncStatus($)))
     // 한도의 초기화 시각이 지나는 것과 다른 세션이 돌린 동기화 결과를 보이도록 1분마다 다시 읽고 그린다
@@ -605,7 +626,7 @@ export const register: Register = on => {
           </Text>
           {/* 지난 대화 전체 목록. 켜진 백그라운드 대화는 연결되고, 꺼진 대화는 다시 켜진다(Ctrl+A로 모든 폴더) */}
           {act('band-resume', 'resume', () => void run($, 'resume'))}
-          {hasSessions && act('band-sessions', 'sessions', () => void run($, 'sessions'))}
+          {hasSessions && act('band-sessions', 'sessions', () => void openSessions($))}
           {isWide && act('band-fork', 'fork', () => void run($, 'fork'))}
           <Text key="band-sep-reply" dimColor>
             │
@@ -727,7 +748,7 @@ export const register: Register = on => {
 
     if (tab === 'keys') {
       // 키는 줄지 않는 열에 기본색으로(파란 [괄호]는 버튼에만 쓴다), 설명은 그 옆 열 안에서만 꺾인다. [/명령]은 줄 끝에 둔다
-      const keyGroups = KEY_GROUPS.map(group => ({
+      const keyGroups = keyGroupsFor(platform).map(group => ({
         title: group.title,
         entries: group.entries.filter(entry => q === '' || entry.keys.toLowerCase().includes(q) || entry.ko.toLowerCase().includes(q)),
       })).filter(group => group.entries.length > 0)
@@ -736,6 +757,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           {tabs}
           <Text dimColor>키는 직접 누른다 · 같은 일을 하는 명령이 있으면 줄 끝 [/명령]으로 바로 실행한다</Text>
+          {platform === 'mac' && <Text dimColor>Mac: Ctrl은 ⌘Command가 아니라 ⌃Control 키, Option은 ⌥ 키다</Text>}
           {Input !== undefined && (
             <Input key="search" placeholder="키나 설명으로 검색" value={raw} autoFocus onInput={(v: string) => void update($, query, () => v)} onSubmit={(v: string) => void update($, query, () => v)} />
           )}
