@@ -30,10 +30,10 @@ MARGIN = (16, 24, 40)  # 창 바깥 여백(위, 좌우, 아래). 그림자가 �
 
 THEMES = {
     'light': dict(bg='#ffffff', chrome='#f3f4f6', border='#d8dce2', title='#57606a', text='#1f2328', dim='#6e7781',
-                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', auto='#8700ff',
+                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', auto='#8700ff', pborder='#a0a6b0',
                   inverse='#ffffff', rule='#c9ced6', shadow='rgba(31,35,40,.18)', shadow2='rgba(31,35,40,.08)'),
     'dark': dict(bg='#17191e', chrome='#22252b', border='#343943', title='#9aa1ac', text='#e6e8eb', dim='#8b919c',
-                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#d77757', auto='#af87ff',
+                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#d77757', auto='#af87ff', pborder='#6b717c',
                  inverse='#17191e', rule='#454b55', shadow='rgba(0,0,0,.55)', shadow2='rgba(0,0,0,.3)'),
 }
 
@@ -69,6 +69,7 @@ class Screen:
     def __init__(self, cols=COLS):
         self.cols = cols
         self.lines = []
+        self.boxes = []  # (맨 윗줄, 왼쪽 열, 폭 칸 수, 테두리 색)
 
     def line(self, *segs):
         self.lines.append(list(segs))
@@ -83,6 +84,13 @@ class Screen:
 
     def blank(self):
         self.lines.append([])
+
+    def bubble(self, text):
+        """내 질문 말풍선: 오른쪽 끝에 붙인 둥근 상자 세 줄(위 테두리, 글, 아래 테두리)"""
+        width = cells(text) + 4
+        col = self.cols - width
+        self.boxes.append((len(self.lines), col, width, 'pborder'))
+        self.lines += [[], [(col + 2, text, 'text')], []]
 
 
 # 칸에 맞춰 직접 그리는 글자: 가로줄·세로줄은 선으로, 막대는 칸을 채운 사각형으로 그린다
@@ -144,6 +152,10 @@ def html_page(screen, theme, title, fonts):
         for col, text, style in segs:
             draw_segment(out, col * CW, text, style, t)
         rows.append(f'<div class="ln" style="top:{PAD_Y + r * LH}px">{"".join(out)}</div>')
+    # 상자는 터미널의 ╭─╮처럼 칸 가운데를 지나는 선으로 그린다
+    for top_row, col, width, color in screen.boxes:
+        rows.append(f'<i class="blk" style="left:{PAD_X + col * CW + CW / 2 - .5:.1f}px;top:{PAD_Y + top_row * LH + LH / 2 - .5:.1f}px;'
+                    f'width:{(width - 1) * CW:.1f}px;height:{2 * LH:.1f}px;border:1px solid {t[color]};border-radius:7px;box-sizing:border-box"></i>')
     # 창 조절 단추(최소화·최대화·닫기)는 Windows 11 모양을 단순한 선으로 그린다
     ctl = (f'<svg viewBox="0 0 46 38"><path d="M18 19h10" stroke="{t["title"]}" stroke-width="1"/></svg>'
            f'<svg viewBox="0 0 46 38"><rect x="18.5" y="14.5" width="9" height="9" rx="1.5" fill="none" stroke="{t["title"]}"/></svg>'
@@ -210,15 +222,12 @@ KO = catalog()
 # ---------- 1. 첫 화면: 대화와 입력창 위 줄(band) ----------
 def hero():
     s = Screen()
-    s.flow(('❯ ', 'dim'), ('결제 실패 시 재시도 로직을 추가해 줘', 'text'))
-    s.blank()
+    # 내 질문은 오른쪽 말풍선, Claude의 답은 왼쪽 그대로다
+    s.bubble('결제 실패 시 재시도 로직을 추가해 줘')
     s.flow(('● ', 'text'), ('재시도 정책을 PaymentService에 추가하고 테스트 3개를 함께 넣었습니다.', 'text'))
-    s.blank()
     s.flow(('✻ Worked for 1m 12s · done 3:42 PM', 'dim'))
     s.flow(('● clickbar: 파일 2개 +48 −6 (PaymentService.java, RetryPolicyTest.java) · 컨텍스트 +6k · API 환산 ≈$0.21', 'dim'))
-    s.blank()
-    s.flow(('❯ ', 'dim'), ('환불 API에도 같은 방식으로 적용해 줘', 'text'))
-    s.blank()
+    s.bubble('환불 API에도 같은 방식으로 적용해 줘')
     # 스피너 줄 끝에 이번 턴의 진행 상황(수정한 파일 수·도구 호출 수)이 붙는다
     s.flow(('✶', 'claude'), (' Pondering · 파일 1개 수정 · 도구 4회…', 'claude'), (' (8s · ↓ 1.2k tokens)', 'dim'))
     s.flow(('── clickbar ' + '─' * (COLS - 12 - 4), 'rule'), (' [-]', 'dim'))

@@ -408,6 +408,34 @@ test('답변을 감싼 바깥 마크다운 펜스만 벗기고, 안쪽 코드 �
   expect(unfence('````python\nprint(1)\n````')).toBe('````python\nprint(1)\n````')
 })
 
+test('내 질문은 오른쪽 말풍선으로 그리고, ctrl+o 전체 기록·다른 세션의 글·/bubbles off에서는 엔진에 맡긴다', async ($, on) => {
+  on('clock.now', () => ({ value: 0 }))
+  // 엔진 자리: 엔진이 직접 그리면 이 표시가 남는다
+  on('ui.render', { component: 'UserMessage' }, (_, e) => ({ type: 'Text', props: {}, children: [`engine:${e.props.text}`] }) as never)
+  const user = (text: string, kind: string, isExpanded = false) =>
+    $.ui.mount({ plugin: 'clickbar', surface: 'terminal', component: 'UserMessage', props: { text, origin: { kind }, isExpanded } } as never)
+  on('store.set', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
+
+  const mine = await user('결제 실패 시 재시도 로직을 추가해 줘\n', 'composer')
+  expect(await mine.find({ type: 'Text', text: '결제 실패 시 재시도 로직을 추가해 줘' })).toBeDefined()
+  const bubble = (await mine.findAll({ type: 'Box' })).find(b => b.props.borderStyle === 'round')
+  expect(bubble?.props.borderColor).toBe('promptBorder')
+  await mine.unmount()
+  for (const [text, kind, expanded] of [['펼친 기록', 'composer', true], ['다른 세션', 'peer', false]] as const) {
+    const other = await user(text, kind, expanded)
+    expect(await other.find({ type: 'Text', text: `engine:${text}` })).toBeDefined()
+    await other.unmount()
+  }
+  await $.command.run({ command: 'bubbles', args: 'off', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } } as never)
+  const off = await user('끈 뒤', 'composer')
+  expect(await off.find({ type: 'Text', text: 'engine:끈 뒤' })).toBeDefined()
+  await off.unmount()
+  // 다음 시험을 위해 다시 켠다
+  await $.command.run({ command: 'bubbles', args: 'on', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } } as never)
+})
+
 test('화면에 그리는 답변에서만 바깥 펜스를 벗긴다', async ($, on) => {
   const drawn: string[] = []
   // 엔진 자리: 플러그인이 넘긴 글을 받아 적는다

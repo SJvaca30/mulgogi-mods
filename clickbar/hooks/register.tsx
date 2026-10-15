@@ -52,6 +52,10 @@ const prompts = atom({ plugin: 'clickbar', key: 'prompts' } as const, [])
 // 명령 추천은 명령마다 세션에서 한 번만 한다
 const tipped = new Set<string>()
 const TIPS_SWITCH_KEY = 'tips'
+// 내 질문 말풍선: 켜고 끄는 값의 열쇠, 왼쪽에 비워 두는 폭(화면 폭에 대한 비율). 긴 질문도 오른쪽에 붙은 채 말풍선 안에서 줄바꿈된다
+const BUBBLES_SWITCH_KEY = 'bubbles'
+const BUBBLE_INDENT = 0.15
+let bubbles = true
 const assumptions = atom({ plugin: 'clickbar', key: 'assumptions' } as const, [])
 const syncStatus = atom({ plugin: 'clickbar', key: 'syncStatus' } as const, null)
 const progress = atom({ plugin: 'clickbar', key: 'turnProgress' } as const, { files: 0, tools: 0 })
@@ -377,6 +381,13 @@ export const register: Register = on => {
       immediate: true,
     })
     await $.command.register({
+      name: 'bubbles',
+      description: '대화에서 내 질문을 오른쪽 말풍선으로 표시합니다. /bubbles off로 끌 수 있습니다',
+      argumentHint: '[on|off]',
+      immediate: true,
+    })
+    bubbles = (await $.store.get(BUBBLES_SWITCH_KEY)) !== 'off'
+    await $.command.register({
       name: 'assumptions',
       description: 'Claude가 확인 없이 정한 가정을 검토하고 바로잡습니다. /assumptions off·on으로 끄고 켭니다(다음 세션부터 적용)',
       argumentHint: '[on|off]',
@@ -480,6 +491,21 @@ export const register: Register = on => {
     return ko === undefined ? result : { ...result, description: ko }
   })
 
+  on('command.run', { command: 'bubbles' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'off' || arg === 'on') {
+      await $.store.set(BUBBLES_SWITCH_KEY, arg)
+      bubbles = arg === 'on'
+      // 이미 그려진 질문도 바로 바뀌도록 다시 그린다
+      $.ui.invalidate('ui.render')
+      $.ui.toast(arg === 'off' ? '내 질문 말풍선을 껐습니다' : '내 질문 말풍선을 켰습니다')
+    } else {
+      $.ui.toast('/bubbles off로 내 질문 말풍선을 끄고, /bubbles on으로 다시 켭니다')
+    }
+
+    return {}
+  })
+
   on('command.run', { command: 'tips' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off' || arg === 'on') {
@@ -580,6 +606,24 @@ export const register: Register = on => {
     if (e.surface !== 'terminal' || e.props.message !== null || extra === '') return next(e)
 
     return next({ ...e, props: { ...e.props, suffix: ` · ${extra}${e.props.suffix}` } })
+  })
+
+  // 내가 보낸 질문은 채팅 앱처럼 오른쪽 둥근 말풍선으로 그린다. Claude의 답은 왼쪽 그대로라 둘이 한눈에 갈린다.
+  // ctrl+o 전체 기록, 터미널이 아닌 화면, 다른 세션·알림이 보낸 글은 엔진이 그린 그대로 둔다
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const kind = e.props.origin.kind
+    const text = e.props.text.replace(/\s+$/, '')
+    if (!bubbles || e.surface !== 'terminal' || e.props.isExpanded || (kind !== 'composer' && kind !== 'bridge') || text === '') return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const indent = Math.max(4, Math.round((e.viewport?.columns ?? 120) * BUBBLE_INDENT))
+
+    return (
+      <Box flexDirection="row" justifyContent="flex-end" paddingLeft={indent}>
+        <Box borderStyle="round" borderColor="promptBorder" paddingX={1}>
+          <Text wrap="wrap">{text}</Text>
+        </Box>
+      </Box>
+    )
   })
 
   // 저장된 답변은 그대로 두고(ctrl+o·/copy는 원문) 화면에서만 바깥 펜스를 벗겨 표·제목을 마크다운으로 그린다
