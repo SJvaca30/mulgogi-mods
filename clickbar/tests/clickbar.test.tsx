@@ -408,7 +408,7 @@ test('답변을 감싼 바깥 마크다운 펜스만 벗기고, 안쪽 코드 �
   expect(unfence('````python\nprint(1)\n````')).toBe('````python\nprint(1)\n````')
 })
 
-test('내 질문은 오른쪽 말풍선으로 그리고, ctrl+o 전체 기록·다른 세션의 글·/bubbles off에서는 엔진에 맡긴다', async ($, on) => {
+test('내 질문은 칠한 말풍선으로 그리고, ctrl+o 전체 기록·다른 세션의 글·/bubbles off에서는 엔진에 맡긴다', async ($, on) => {
   on('clock.now', () => ({ value: 0 }))
   // 엔진 자리: 엔진이 직접 그리면 이 표시가 남는다
   on('ui.render', { component: 'UserMessage' }, (_, e) => ({ type: 'Text', props: {}, children: [`engine:${e.props.text}`] }) as never)
@@ -420,8 +420,10 @@ test('내 질문은 오른쪽 말풍선으로 그리고, ctrl+o 전체 기록·�
 
   const mine = await user('결제 실패 시 재시도 로직을 추가해 줘\n', 'composer')
   expect(await mine.find({ type: 'Text', text: '결제 실패 시 재시도 로직을 추가해 줘' })).toBeDefined()
-  const bubble = (await mine.findAll({ type: 'Box' })).find(b => b.props.borderStyle === 'round')
-  expect(bubble?.props.borderColor).toBe('promptBorder')
+  // 테두리 글자 없이 배경을 칠하고(복사할 때 글만 따라온다), 테마를 모르면 엔진의 내 질문 배경색 이름을 쓴다
+  const boxes = await mine.findAll({ type: 'Box' })
+  expect(boxes.some(b => b.props.borderStyle !== undefined)).toBe(false)
+  expect(boxes.find(b => b.props.backgroundColor !== undefined)?.props.backgroundColor).toBe('userMessageBackground')
   await mine.unmount()
   for (const [text, kind, expanded] of [['펼친 기록', 'composer', true], ['다른 세션', 'peer', false]] as const) {
     const other = await user(text, kind, expanded)

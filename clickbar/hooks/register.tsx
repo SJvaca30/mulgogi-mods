@@ -23,6 +23,8 @@ const COL_COMMAND = 20
 const COL_ROW_ACTIONS = 13
 // [단축키] 탭의 키 열 폭: 가장 긴 "Ctrl+W · K · U"(14칸)에 두 칸 여유
 const COL_KEY = 16
+// 내 질문·아이디어 탭의 시각 열 폭: 가장 긴 "10/15 16:10"(11칸). 줄지 않게 둬서 시각이 꺾이지 않고 세로로 맞는다
+const COL_WHEN = 11
 // band 맨 위 가로줄의 머리 글. 채팅과 band 사이 경계이고, 엔진의 [-]가 이 줄 끝에 붙는다
 const BAND_RULE_LABEL = '── clickbar '
 const NARROW_COLUMNS = 72
@@ -52,10 +54,15 @@ const prompts = atom({ plugin: 'clickbar', key: 'prompts' } as const, [])
 // 명령 추천은 명령마다 세션에서 한 번만 한다
 const tipped = new Set<string>()
 const TIPS_SWITCH_KEY = 'tips'
-// 내 질문 말풍선: 켜고 끄는 값의 열쇠, 왼쪽에 비워 두는 폭(화면 폭에 대한 비율). 긴 질문도 오른쪽에 붙은 채 말풍선 안에서 줄바꿈된다
+// 내 질문 말풍선: 켜고 끄는 값의 열쇠, 말풍선의 최대 폭(대화 칸 폭에 대한 비율). 긴 질문도 이 폭 안에서 줄바꿈되어 말풍선 모양이 남는다.
+// 화면 폭이 아니라 대화 칸 폭을 기준으로 해서, 패널이 옆에 붙어 대화 칸이 좁아져도 같은 비율로 맞는다
 const BUBBLES_SWITCH_KEY = 'bubbles'
-const BUBBLE_INDENT = 0.15
+const BUBBLE_MAX_WIDTH = '85%'
+// 말풍선 배경색. 엔진 기본(userMessageBackground: 밝은 테마 rgb(240,240,240), 어두운 테마 rgb(55,55,55))은 흰 바탕에서 거의 안 보여
+// 한 단계 진한 회색을 쓴다. ANSI 테마나 모르는 테마는 그 터미널 색표를 따르도록 엔진의 색 이름을 그대로 쓴다
+const BUBBLE_FILL: Record<string, string> = { light: '#e4e8ee', 'light-daltonized': '#e4e8ee', dark: '#3a3f48', 'dark-daltonized': '#3a3f48' }
 let bubbles = true
+let theme = ''
 const assumptions = atom({ plugin: 'clickbar', key: 'assumptions' } as const, [])
 const syncStatus = atom({ plugin: 'clickbar', key: 'syncStatus' } as const, null)
 const progress = atom({ plugin: 'clickbar', key: 'turnProgress' } as const, { files: 0, tools: 0 })
@@ -382,11 +389,12 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'bubbles',
-      description: '대화에서 내 질문을 오른쪽 말풍선으로 표시합니다. /bubbles off로 끌 수 있습니다',
+      description: '대화에서 내 질문을 회색 말풍선으로 표시합니다. /bubbles off로 끌 수 있습니다',
       argumentHint: '[on|off]',
       immediate: true,
     })
     bubbles = (await $.store.get(BUBBLES_SWITCH_KEY)) !== 'off'
+    theme = String((await $.config.list().catch(() => [])).find(row => row.key === 'theme')?.value ?? '')
     await $.command.register({
       name: 'assumptions',
       description: 'Claude가 확인 없이 정한 가정을 검토하고 바로잡습니다. /assumptions off·on으로 끄고 켭니다(다음 세션부터 적용)',
@@ -608,22 +616,32 @@ export const register: Register = on => {
     return next({ ...e, props: { ...e.props, suffix: ` · ${extra}${e.props.suffix}` } })
   })
 
-  // 내가 보낸 질문은 채팅 앱처럼 오른쪽 둥근 말풍선으로 그린다. Claude의 답은 왼쪽 그대로라 둘이 한눈에 갈린다.
+  // 내가 보낸 질문은 회색으로 칠한 말풍선으로 그린다. Claude의 답은 칠하지 않은 글 그대로라 둘이 한눈에 갈린다.
+  // 테두리 글자(╭─╮│) 대신 배경을 칠해, 마우스로 끌어 복사해도 질문 글만 따라온다. 읽는 흐름이 끊기지 않게 왼쪽에 붙이고,
+  // 위에만 빈 줄을 둬서 질문이 앞의 답과 떨어지고 뒤따르는 제 답과 한 덩어리로 보이게 한다.
   // ctrl+o 전체 기록, 터미널이 아닌 화면, 다른 세션·알림이 보낸 글은 엔진이 그린 그대로 둔다
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const kind = e.props.origin.kind
     const text = e.props.text.replace(/\s+$/, '')
     if (!bubbles || e.surface !== 'terminal' || e.props.isExpanded || (kind !== 'composer' && kind !== 'bridge') || text === '') return next(e)
     const { Box, Text } = $.ui.resolve(e)
-    const indent = Math.max(4, Math.round((e.viewport?.columns ?? 120) * BUBBLE_INDENT))
 
     return (
-      <Box flexDirection="row" justifyContent="flex-end" paddingLeft={indent}>
-        <Box borderStyle="round" borderColor="promptBorder" paddingX={1}>
+      <Box flexDirection="row" marginTop={1} width={BUBBLE_MAX_WIDTH}>
+        <Box backgroundColor={BUBBLE_FILL[theme] ?? 'userMessageBackground'} paddingX={1}>
           <Text wrap="wrap">{text}</Text>
         </Box>
       </Box>
     )
+  })
+
+  // /theme으로 테마를 바꾸면 말풍선 색도 바로 바꾼다
+  on('config.set', { key: 'theme' }, async ($, e, next) => {
+    const result = await next(e)
+    theme = String(e.value)
+    $.ui.invalidate('ui.render')
+
+    return result
   })
 
   // 저장된 답변은 그대로 두고(ctrl+o·/copy는 원문) 화면에서만 바깥 펜스를 벗겨 표·제목을 마크다운으로 그린다
@@ -721,7 +739,7 @@ export const register: Register = on => {
         </Box>
         {/* 버튼 이름은 모두 영어다. 명령이 있는 버튼은 그 명령 이름 그대로다(palette=/palette, assumptions=/assumptions).
             용도별로 │로 묶는다: 컨텍스트 │ 대화 찾기·나누기 │ 답변 다루기 │ 도구. 나타났다 사라지는 assumptions는 맨 끝에 둬서 다른 버튼이 밀리지 않게 한다 */}
-        <Box key="actions" gap={1} flexWrap="wrap">
+        <Box key="actions" columnGap={1} flexWrap="wrap">
           {act('band-compact', view?.tone === 'bad' ? 'compact now' : 'compact', () => void run($, 'compact'), view?.tone === 'bad' ? 'error' : 'suggestion')}
           {act('band-context', 'context', () => void run($, 'context'))}
           <Text key="band-sep-chat" dimColor>
@@ -921,10 +939,17 @@ export const register: Register = on => {
           {list.length === 0 && <Text dimColor>아직 기록된 질문이 없습니다. 이 기능을 켠 뒤 보낸 질문부터 기록합니다</Text>}
           {list.map((p, i) => (
             <Box key={`prompt-${p.uuid}`} gap={1}>
-              {act(`prompt-jump-${i}`, '이동', () => void jumpTo($, p))}
-              {act(`prompt-fill-${i}`, '입력창에', () => void $.prompt.fill({ text: p.text, mode: 'insert' }).then(filled => reportFill($, filled)))}
-              <Text dimColor>{p.at > 0 ? whenText(p.at, now) : '--:--'}</Text>
-              <Text>{p.text}</Text>
+              {/* 버튼과 시각은 줄지 않는 열, 질문 글은 남는 폭 안에서만 꺾인다(명령 탭과 같은 표 모양) */}
+              <Box flexShrink={0} columnGap={1}>
+                {act(`prompt-jump-${i}`, '이동', () => void jumpTo($, p))}
+                {act(`prompt-fill-${i}`, '입력창에', () => void $.prompt.fill({ text: p.text, mode: 'insert' }).then(filled => reportFill($, filled)))}
+              </Box>
+              <Box width={COL_WHEN} flexShrink={0}>
+                <Text dimColor>{p.at > 0 ? whenText(p.at, now) : '--:--'}</Text>
+              </Box>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text>{p.text}</Text>
+              </Box>
             </Box>
           ))}
         </Box>
@@ -994,11 +1019,17 @@ export const register: Register = on => {
           {list.length === 0 && <Text dimColor>보관한 아이디어가 없습니다</Text>}
           {list.map((idea, i) => (
             <Box key={`idea-${i}`} gap={1}>
-              {act(`idea-send-${i}`, '보내기', () => void sendIdea($, idea))}
-              {act(`idea-use-${i}`, '입력창에', () => void $.prompt.fill({ text: idea.text, mode: 'insert' }).then(filled => reportFill($, filled)))}
-              {act(`idea-del-${i}`, '삭제', () => void removeIdea($, idea))}
-              <Text dimColor>{whenText(idea.at, now)}</Text>
-              <Text>{idea.text}</Text>
+              <Box flexShrink={0} columnGap={1}>
+                {act(`idea-send-${i}`, '보내기', () => void sendIdea($, idea))}
+                {act(`idea-use-${i}`, '입력창에', () => void $.prompt.fill({ text: idea.text, mode: 'insert' }).then(filled => reportFill($, filled)))}
+                {act(`idea-del-${i}`, '삭제', () => void removeIdea($, idea))}
+              </Box>
+              <Box width={COL_WHEN} flexShrink={0}>
+                <Text dimColor>{whenText(idea.at, now)}</Text>
+              </Box>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text>{idea.text}</Text>
+              </Box>
             </Box>
           ))}
         </Box>
@@ -1018,9 +1049,13 @@ export const register: Register = on => {
           {list.length === 0 && <Text dimColor>아직 답변이 없습니다</Text>}
           {list.map((text, i) => (
             <Box key={`reply-${i}`} gap={1}>
-              {act(`reply-copy-${i}`, 'copy', press => void copyText($, text, press.surface, `${i + 1}번째 최근 답변`))}
-              <Text dimColor>{i + 1}</Text>
-              <Text>{previewLine(text)}</Text>
+              <Box flexShrink={0}>{act(`reply-copy-${i}`, 'copy', press => void copyText($, text, press.surface, `${i + 1}번째 최근 답변`))}</Box>
+              <Box width={2} flexShrink={0} justifyContent="flex-end">
+                <Text dimColor>{i + 1}</Text>
+              </Box>
+              <Box flexGrow={1} flexShrink={1}>
+                <Text>{previewLine(text)}</Text>
+              </Box>
             </Box>
           ))}
         </Box>

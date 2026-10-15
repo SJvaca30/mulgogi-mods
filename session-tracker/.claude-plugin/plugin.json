@@ -1,6 +1,6 @@
 {
   "name": "session-tracker",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "실행 중인 세션의 종류와 상태를 입력창 위에 표시하고, 세션 패널에서 이 PC의 모든 대화를 폴더·날짜별로 관리합니다.",
   "author": {
     "name": "SJvaca30",

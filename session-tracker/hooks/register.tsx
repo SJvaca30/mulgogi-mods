@@ -1067,34 +1067,37 @@ export const register: Register = on => {
             {rule}
           </Text>
         )}
-        {/* 좁은 화면에서 줄이 꺾여도 빈 줄이 끼지 않도록 가로 간격만 둔다 */}
-        <Box key="peers" columnGap={1} rowGap={0} flexWrap="wrap">
+        {/* 한 줄에 이 대화의 종류, 같은 폴더의 다른 세션 개수를 차례로 둔다. │·같은 구분 기호 대신 빈칸으로 띄워
+            좁아서 꺾일 때 줄 맨 앞에 기호가 남지 않게 하고, 꺾여도 빈 줄이 끼지 않도록 가로 간격만 둔다.
+            안쪽에 또 꺾이는 상자를 두면 그 상자가 한 줄을 다 차지하므로 항목을 한 단계로 늘어놓는다.
+            항목 사이는 clickbar 상태 줄처럼 세 칸이다. 배지와 "작업 중 1" 같은 개수 글은 줄지 않게 해서 쪼개지지 않고, 요청 미리보기만 남는 폭 안에서 꺾인다 */}
+        <Box key="peers" columnGap={3} rowGap={0} flexWrap="wrap">
           {kind !== null && (
-            <Text key="self-kind" backgroundColor={kind.color} color="inverseText" bold>
-              {` ${kind.badge} `}
-            </Text>
-          )}
-          {kind !== null && (
-            <Text key="self-kind-hint" dimColor>
-              {kind.hint}
-            </Text>
-          )}
-          {kind !== null && list.length > 0 && (
-            <Box key="self-kind-sep">
-              <Text dimColor>│</Text>
+            <Box key="self-kind" columnGap={1} flexShrink={1}>
+              <Box flexShrink={0}>
+                <Text backgroundColor={kind.color} color="inverseText" bold>
+                  {` ${kind.badge} `}
+                </Text>
+              </Box>
+              <Text dimColor>{kind.hint}</Text>
             </Box>
           )}
-          {list.length > 0 && <Text dimColor>같은 폴더 다른 세션 {list.length}개:</Text>}
-          {peerCounts.map((c, i) => {
+          {list.length > 0 && (
+            <Box key="peer-label" flexShrink={0}>
+              <Text dimColor>같은 폴더 다른 세션 {list.length}개:</Text>
+            </Box>
+          )}
+          {peerCounts.map(c => {
             // 작업 중·승인 대기는 겹칠 위험이 있어, 가장 최근 것 하나의 요청을 개수 옆에 붙인다
             const latest = c.status === 'idle' ? undefined : list.find(p => p.status === c.status)
 
             return (
-              <Box key={`peer-count-${c.status}`} columnGap={1}>
-                {i > 0 && <Text dimColor>·</Text>}
-                <Text {...toneProps(PEER_TONE[c.status])}>{`${STATUS_WORDS[c.status]} ${c.n}`}</Text>
+              <Box key={`peer-count-${c.status}`} columnGap={1} flexShrink={1}>
+                <Box flexShrink={0}>
+                  <Text {...toneProps(PEER_TONE[c.status])}>{`${STATUS_WORDS[c.status]} ${c.n}`}</Text>
+                </Box>
                 {latest !== undefined && (
-                  <Box key={`peer-${latest.id}`}>
+                  <Box key={`peer-${latest.id}`} flexShrink={1}>
                     <Text dimColor>{`("${firstLine(latest.prompt, 24) || '요청 없음'}" ${agoText(now - latest.changedAt)})`}</Text>
                   </Box>
                 )}
