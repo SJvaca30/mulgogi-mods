@@ -1,6 +1,6 @@
 {
   "name": "session-tracker",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "입력창 위에 이 대화의 세션 종류(백그라운드·포그라운드)와 같은 폴더의 다른 Claude 세션을 보여 주고, 세션 패널(/sessions)에서 이 PC의 모든 세션을 폴더별로 보고 Orca 탭으로 이동한다",
   "author": {
     "name": "SJvaca30",

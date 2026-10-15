@@ -98,6 +98,64 @@ export const GROUPS: { title: string; entries: Entry[] }[] = [
       { name: 'flow', ko: '이 대화의 서브에이전트를 나무 모양으로 본다. 다시 입력하면 닫힌다' },
     ],
   },
+  // 설치한 스킬과 플러그인 명령. 팔레트에 보이는 설명만 바꾸고, Claude가 스킬을 고를 때 읽는 SKILL.md의 설명은 그대로다.
+  // / 메뉴의 한국어 설명(command.describe)도 엔진 내장 명령에만 쓰므로 이 묶음은 영향이 없다. 설치되지 않은 것은 보이지 않는다.
+  // "직접 불러야 한다"는 SKILL.md에 disable-model-invocation: true가 있어 Claude가 알아서 쓰지 않는 스킬이다(2026-10-15 확인)
+  {
+    title: '스킬 · 개발 방법',
+    entries: [
+      { name: 'tdd', ko: '테스트를 먼저 쓰고 통과시키는 순서(레드-그린-리팩터)로 기능을 만들거나 버그를 고친다' },
+      { name: 'diagnosing-bugs', ko: '어려운 버그나 성능 저하를 재현하고 가설을 세워 원인을 좁혀 찾는다' },
+      { name: 'codebase-design', ko: '작은 인터페이스 뒤에 많은 일을 숨기는 깊은 모듈 관점으로 모듈 경계와 인터페이스를 설계한다' },
+      { name: 'domain-modeling', ko: '도메인 용어를 다듬어 CONTEXT.md(용어집)와 ADR(결정 기록)을 쓰고 고친다' },
+      { name: 'grilling', ko: '계획·결정·아이디어를 끝까지 따져 묻는 질문으로 빈틈을 찾는다' },
+      { name: 'grill-with-docs', ko: '따져 묻는 질문으로 계획·설계를 다듬으면서 ADR과 용어집도 함께 쓴다. 직접 불러야 한다' },
+      { name: 'handoff', ko: '지금 대화를 다른 에이전트가 이어받을 인계 문서로 줄여 쓴다. 직접 불러야 한다' },
+      { name: 'setup-matt-pocock-skills', ko: '개발 스킬을 처음 쓰기 전에 이 저장소의 이슈 트래커·라벨·문서 구조를 한 번 설정한다. 직접 불러야 한다' },
+      { name: 'shadcn-lint', ko: 'Tailwind v4 프로젝트의 UI 코드가 디자인 시스템 규칙에 맞는지 @shadcn/lint로 검사한다' },
+      { name: 'skill-creator', ko: '스킬을 새로 만들거나 고치고, 평가를 돌려 성능과 설명의 호출 정확도를 높인다' },
+    ],
+  },
+  {
+    title: '스킬 · 문서와 파일',
+    entries: [
+      { name: 'docs', ko: '공유하고 댓글을 다는 claude.ai 문서를 만들고 고친다. 보고서·제안서 같은 글의 기본 형식이다' },
+      { name: 'docx', ko: 'Word 문서(.docx·.dotx)를 만들고, 읽고, 고친다' },
+      { name: 'pdf', ko: 'PDF에서 글·표를 뽑고, 합치고, 나누고, 새로 만들고, 양식을 채운다' },
+      { name: 'pptx', ko: 'PowerPoint 파일(.pptx·.potx)을 만들고, 읽고, 고친다' },
+      { name: 'xlsx', ko: '엑셀·CSV 같은 표 파일을 열어 고치고 정리하거나 새로 만든다' },
+      { name: 'google-workspace', ko: 'Google Docs·Sheets·Slides 파일을 만들거나 고칠 때 연결 도구보다 먼저 읽는 안내다' },
+    ],
+  },
+  {
+    title: '스킬 · 그림과 웹',
+    entries: [
+      { name: 'diagram-design:diagram-design', ko: '아키텍처·흐름도·시퀀스·ERD·간트 등 여러 다이어그램을 HTML·SVG·PNG로 그린다' },
+      { name: 'diagram-design:import-mermaid', ko: 'Mermaid 코드를 원하는 형식·크기·상세도로 다시 그린다' },
+      { name: 'diagram-design:import-drawio', ko: 'draw.io 파일을 원하는 형식·크기·상세도로 다시 그린다' },
+      { name: 'diagram-design:import-excalidraw', ko: 'Excalidraw 보드를 원하는 형식·크기·상세도로 다시 그린다' },
+      { name: 'diagram-design:export-diagram', ko: '다이어그램 HTML 파일을 같은 폴더에 .svg와 .png로 내보낸다' },
+      { name: 'diagram-design:profile', ko: '고객사별 다이어그램 프로필을 저장·불러오기·확인·수정·초기화·삭제한다' },
+      { name: 'diagram-design:doctor', ko: '다이어그램 도구를 쓸 환경이 준비됐는지 한 번에 점검한다' },
+      { name: 'insane-search:insane-search', ko: '차단된 사이트·SNS·영상 자막 같은 웹 내용을 되는 방법을 찾아가며 가져온다' },
+    ],
+  },
+  {
+    title: '스킬 · Orca',
+    entries: [
+      { name: 'orca-cli', ko: 'Orca의 워크트리·터미널·내장 브라우저·자동화를 orca 명령으로 다룬다' },
+      { name: 'orchestration', ko: 'Orca 작업자 여럿에게 일을 나눠 맡기고 메시지·완료 보고를 조율한다' },
+      { name: 'computer-use', ko: '화면에 보이는 앱 창을 orca computer로 클릭·입력·메뉴·스크린샷 조작한다' },
+    ],
+  },
+  {
+    title: '스킬 · 그 밖',
+    entries: [
+      { name: 'learn', ko: '일을 대신하기보다 원리를 이해하고 싶을 때 설명과 퀴즈로 가르쳐 준다' },
+      { name: 'morning', ko: '아침 브리핑을 HTML 페이지로 만들거나 평일마다 도는 작업으로 설정한다' },
+      { name: 'import-memory', ko: '다른 AI 비서에서 내보낸 메모리를 Claude 메모리로 가져온다' },
+    ],
+  },
 ]
 
 export const DEFAULT_FAVORITES = ['compact', 'context', 'tasks', 'fork', 'rewind', 'btw']

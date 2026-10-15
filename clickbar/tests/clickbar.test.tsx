@@ -196,6 +196,7 @@ test('팔레트는 한국어 설명을 보여주고, ▶는 실행하되 인자�
       { name: 'rewind', description: 'Rewind', source: 'builtin' as const },
       { name: 'stop', description: 'Stop this background session', source: 'builtin' as const },
       { name: 'my-skill', description: 'A skill', source: 'user' as const },
+      { name: 'tdd', description: 'Test-driven development.', source: 'user' as const },
     ],
   }))
   on('command.run', ($, e) => {
@@ -218,6 +219,10 @@ test('팔레트는 한국어 설명을 보여주고, ▶는 실행하되 인자�
   expect(await ui.find({ type: 'Text', text: /그 밖의 명령 1개/ })).toBeDefined()
   // 한국어 설명이 없는 명령도 검색하지 않아도 보인다
   expect(await ui.find({ key: 'etc-run-my-skill' })).toBeDefined()
+  // 설치한 스킬은 용도별 묶음에 한국어 설명으로 나오고, 설치되지 않은 스킬 묶음은 보이지 않는다
+  expect(await ui.find({ type: 'Text', text: '스킬 · 개발 방법' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^테스트를 먼저 쓰고/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '스킬 · 문서와 파일' })).toBe(undefined)
   await ui.press({ key: 'fav-run-rewind' })
   await ui.press({ key: 'fav-run-btw' })
   // 잘못 누르면 하던 일이 멈추는 /stop은 입력창에만 넣는다
@@ -591,6 +596,9 @@ test('/ 메뉴: 엔진 내장 명령의 설명만 한국어로 바꾼다', async
   const other = await $.command.describe({ command: 'compact', description: 'Mine', isHidden: false, immediate: false, provider: { plugin: 'someone', tier: 'user' } } as never)
   expect(core.description).toMatch(/^대화를 요약해/)
   expect(other.description).toBe('Mine')
+  // 팔레트에 한국어 설명을 둔 스킬도 / 메뉴에서는 원래 설명 그대로다(엔진 내장 명령이 아니므로)
+  const skill = await $.command.describe({ command: 'tdd', description: 'Test-driven development.', isHidden: false, immediate: false, provider: { plugin: 'skills', tier: 'user' } } as never)
+  expect(skill.description).toBe('Test-driven development.')
 })
 
 test('[단축키]는 OS에 맞는 키를 보인다: macOS는 Option 키·이미지 붙여넣기 Ctrl+V, OS는 환경 변수로 가린다', async () => {

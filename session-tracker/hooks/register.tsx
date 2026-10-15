@@ -809,6 +809,7 @@ export const register: Register = on => {
     const row = (it: SessionItem) => {
       const isOff = it.kind === 'off'
       const s = stateWord(it.state, it.kind)
+      const kindView = selfKindView(it.kind)
       const isManaged = managed === it.sessionId
 
       return (
@@ -834,7 +835,8 @@ export const register: Register = on => {
               {isOff ? <Text dimColor>{sinceText(now - it.at)}</Text> : <Text {...toneProps(s.tone)}>{s.word}</Text>}
             </Box>
             <Box width={COL_KIND} flexShrink={0}>
-              <Text dimColor>{kindWord(it.kind) || '-'}</Text>
+              {/* 켜진 대화의 종류는 입력창 위 배지와 같은 색(백그라운드 파랑, 포그라운드 노랑)으로, 유휴는 흐리게 */}
+              {kindView === null ? <Text dimColor>{kindWord(it.kind) || '-'}</Text> : <Text color={kindView.color}>{kindWord(it.kind)}</Text>}
             </Box>
             {/* 켜진 대화의 이름은 밑줄로 눌러서 고칠 수 있음을 보인다. 꺼진 대화는 이름을 바꿀 수 없다 */}
             {editing === it.sessionId && Input !== undefined ? (

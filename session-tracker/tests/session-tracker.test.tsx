@@ -348,6 +348,10 @@ test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터
   expect(await ui.find({ key: 'agent-open-83b9eb02-1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Orca의 미사용 세션' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '유휴' })).toBeDefined()
+  // 종류 글자는 입력창 위 배지와 같은 색이다: 백그라운드 파랑, 포그라운드 노랑, 유휴는 흐리게
+  expect((await ui.find({ type: 'Text', text: '백그라운드' }))?.props.color).toBe('suggestion')
+  expect((await ui.find({ type: 'Text', text: '포그라운드' }))?.props.color).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: '유휴' }))?.props.dimColor).toBe(true)
   expect(await ui.find({ key: 'agent-open-spare-1' })).toBeUndefined()
   expect(await ui.find({ key: 'agent-open-scratch-1' })).toBeUndefined()
   // 켜진 대화의 이동: Orca 탭이 있으면 전환, 탭 없는 백그라운드 세션은 새 탭에서 붙인다
