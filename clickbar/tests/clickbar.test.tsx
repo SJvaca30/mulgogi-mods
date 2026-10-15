@@ -408,34 +408,48 @@ test('답변을 감싼 바깥 마크다운 펜스만 벗기고, 안쪽 코드 �
   expect(unfence('````python\nprint(1)\n````')).toBe('````python\nprint(1)\n````')
 })
 
-test('내 질문은 칠한 말풍선으로 그리고, ctrl+o 전체 기록·다른 세션의 글·/bubbles off에서는 엔진에 맡긴다', async ($, on) => {
+test('내 질문은 막대 카드(기본)·카드·표식으로 그리고, ctrl+o 전체 기록·다른 세션의 글·/bubbles off에서는 엔진에 맡긴다', async ($, on) => {
   on('clock.now', () => ({ value: 0 }))
   // 엔진 자리: 엔진이 직접 그리면 이 표시가 남는다
   on('ui.render', { component: 'UserMessage' }, (_, e) => ({ type: 'Text', props: {}, children: [`engine:${e.props.text}`] }) as never)
   const user = (text: string, kind: string, isExpanded = false) =>
     $.ui.mount({ plugin: 'clickbar', surface: 'terminal', component: 'UserMessage', props: { text, origin: { kind }, isExpanded } } as never)
+  const bubbles = (args: string) =>
+    $.command.run({ command: 'bubbles', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } } as never)
   on('store.set', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
 
+  // 기본은 막대 카드: 테두리 글자 없이 왼쪽 막대(칸 하나)와 위아래 여백을 둔 카드를 칠한다(복사할 때 글만 따라온다).
+  // 테마를 모르면 카드 바탕은 엔진의 내 질문 배경색 이름을 쓴다
   const mine = await user('결제 실패 시 재시도 로직을 추가해 줘\n', 'composer')
   expect(await mine.find({ type: 'Text', text: '결제 실패 시 재시도 로직을 추가해 줘' })).toBeDefined()
-  // 테두리 글자 없이 배경을 칠하고(복사할 때 글만 따라온다), 테마를 모르면 엔진의 내 질문 배경색 이름을 쓴다
   const boxes = await mine.findAll({ type: 'Box' })
   expect(boxes.some(b => b.props.borderStyle !== undefined)).toBe(false)
-  expect(boxes.find(b => b.props.backgroundColor !== undefined)?.props.backgroundColor).toBe('userMessageBackground')
+  expect(boxes.find(b => b.props.width === 1)?.props.backgroundColor).toBe('suggestion')
+  expect(boxes.find(b => b.props.paddingY === 1)?.props.backgroundColor).toBe('userMessageBackground')
   await mine.unmount()
   for (const [text, kind, expanded] of [['펼친 기록', 'composer', true], ['다른 세션', 'peer', false]] as const) {
     const other = await user(text, kind, expanded)
     expect(await other.find({ type: 'Text', text: `engine:${text}` })).toBeDefined()
     await other.unmount()
   }
-  await $.command.run({ command: 'bubbles', args: 'off', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } } as never)
+  // 카드는 막대 없이 칠하고, 표식은 배경 없이 ❯와 흐린 글이다
+  await bubbles('card')
+  const card = await user('카드', 'composer')
+  expect((await card.findAll({ type: 'Box' })).some(b => b.props.width === 1)).toBe(false)
+  await card.unmount()
+  await bubbles('mark')
+  const mark = await user('표식', 'composer')
+  expect(await mark.find({ type: 'Text', text: '❯' })).toBeDefined()
+  expect((await mark.find({ type: 'Text', text: '표식' }))?.props.dimColor).toBe(true)
+  await mark.unmount()
+  await bubbles('off')
   const off = await user('끈 뒤', 'composer')
   expect(await off.find({ type: 'Text', text: 'engine:끈 뒤' })).toBeDefined()
   await off.unmount()
-  // 다음 시험을 위해 다시 켠다
-  await $.command.run({ command: 'bubbles', args: 'on', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } } as never)
+  // 다음 시험을 위해 기본 모양으로 되돌린다
+  await bubbles('on')
 })
 
 test('화면에 그리는 답변에서만 바깥 펜스를 벗긴다', async ($, on) => {

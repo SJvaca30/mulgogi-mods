@@ -30,10 +30,10 @@ MARGIN = (16, 24, 40)  # 창 바깥 여백(위, 좌우, 아래). 그림자가 �
 
 THEMES = {
     'light': dict(bg='#ffffff', chrome='#f3f4f6', border='#d8dce2', title='#57606a', text='#1f2328', dim='#6e7781',
-                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', auto='#8700ff', pborder='#a0a6b0', bfill='#e4e8ee',
+                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', auto='#8700ff', band='#f2f3f5',
                   inverse='#ffffff', rule='#c9ced6', shadow='rgba(31,35,40,.18)', shadow2='rgba(31,35,40,.08)'),
     'dark': dict(bg='#17191e', chrome='#22252b', border='#343943', title='#9aa1ac', text='#e6e8eb', dim='#8b919c',
-                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#d77757', auto='#af87ff', pborder='#6b717c', bfill='#3a3f48',
+                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#d77757', auto='#af87ff', band='#2a2e35',
                  inverse='#17191e', rule='#454b55', shadow='rgba(0,0,0,.55)', shadow2='rgba(0,0,0,.3)'),
 }
 
@@ -86,10 +86,13 @@ class Screen:
         self.lines.append([])
 
     def bubble(self, text):
-        """내 질문 말풍선: 위에 빈 줄 하나, 왼쪽에 붙여 회색으로 칠한 한 줄(좌우 한 칸 여백)"""
+        """내 질문 막대 카드: 위에 빈 줄 하나, 대화 칸 전체 폭의 옅은 카드(위아래 한 줄 여백)와 왼쪽 색 막대(칸 하나)"""
         self.lines.append([])
-        self.fills.append((len(self.lines), 0, cells(text) + 2, 'bfill'))
-        self.lines.append([(1, text, 'text')])
+        top = len(self.lines)
+        for r in range(3):
+            self.fills.append((top + r, 0, 1, 'sug'))
+            self.fills.append((top + r, 1, self.cols - 1, 'band'))
+        self.lines += [[], [(3, text, 'text')], []]
 
 
 # 칸에 맞춰 직접 그리는 글자: 가로줄·세로줄은 선으로, 막대는 칸을 채운 사각형으로 그린다
@@ -220,7 +223,7 @@ KO = catalog()
 # ---------- 1. 첫 화면: 대화와 입력창 위 줄(band) ----------
 def hero():
     s = Screen()
-    # 내 질문은 회색으로 칠한 말풍선, Claude의 답은 칠하지 않은 글이다. 메시지 사이 빈 줄은 실제 화면과 같다
+    # 내 질문은 왼쪽 막대가 있는 옅은 카드, Claude의 답은 칠하지 않은 글이다. 메시지 사이 빈 줄은 실제 화면과 같다
     s.bubble('결제 실패 시 재시도 로직을 추가해 줘')
     s.blank()
     s.flow(('● ', 'text'), ('재시도 정책을 PaymentService에 추가하고 테스트 3개를 함께 넣었습니다.', 'text'))

@@ -54,15 +54,23 @@ const prompts = atom({ plugin: 'clickbar', key: 'prompts' } as const, [])
 // 명령 추천은 명령마다 세션에서 한 번만 한다
 const tipped = new Set<string>()
 const TIPS_SWITCH_KEY = 'tips'
-// 내 질문 말풍선: 켜고 끄는 값의 열쇠, 말풍선의 최대 폭(대화 칸 폭에 대한 비율). 긴 질문도 이 폭 안에서 줄바꿈되어 말풍선 모양이 남는다.
-// 화면 폭이 아니라 대화 칸 폭을 기준으로 해서, 패널이 옆에 붙어 대화 칸이 좁아져도 같은 비율로 맞는다
+// 내 질문 표시 모양(/bubbles로 고른다). card: 대화 칸 전체 폭의 옅은 카드(위아래 한 줄 여백), bar: 그 카드 왼쪽에 색 막대,
+// mark: 배경 없이 색 있는 ❯와 흐린 글. 카드와 막대는 글자가 아니라 칠한 칸이라 마우스로 끌어 복사해도 질문 글만 따라온다
 const BUBBLES_SWITCH_KEY = 'bubbles'
-const BUBBLE_MAX_WIDTH = '85%'
-// 말풍선 배경색. 엔진 기본(userMessageBackground: 밝은 테마 rgb(240,240,240), 어두운 테마 rgb(55,55,55))은 흰 바탕에서 거의 안 보여
-// 한 단계 진한 회색을 쓴다. ANSI 테마나 모르는 테마는 그 터미널 색표를 따르도록 엔진의 색 이름을 그대로 쓴다
-const BUBBLE_FILL: Record<string, string> = { light: '#e4e8ee', 'light-daltonized': '#e4e8ee', dark: '#3a3f48', 'dark-daltonized': '#3a3f48' }
-let bubbles = true
+const BUBBLE_STYLES = ['card', 'bar', 'mark'] as const
+type BubbleStyle = (typeof BUBBLE_STYLES)[number]
+const DEFAULT_BUBBLE_STYLE: BubbleStyle = 'bar'
+const BUBBLE_LABELS: Record<BubbleStyle, string> = { card: '카드', bar: '막대 카드', mark: '표식' }
+// 카드 바탕색: 흰·검은 바탕에서 카드로 보일 만큼만 옅게 둔다(진하면 형광펜처럼 보인다). ANSI 테마나 모르는 테마는 엔진의 내 질문 배경색 이름을 쓴다
+const BUBBLE_BAND: Record<string, string> = { light: '#f2f3f5', 'light-daltonized': '#f2f3f5', dark: '#2a2e35', 'dark-daltonized': '#2a2e35' }
+let bubbleStyle: BubbleStyle | 'off' = DEFAULT_BUBBLE_STYLE
 let theme = ''
+
+function bubbleStyleOf(saved: unknown): BubbleStyle | 'off' {
+  if (saved === 'off') return 'off'
+
+  return (BUBBLE_STYLES as readonly unknown[]).includes(saved) ? (saved as BubbleStyle) : DEFAULT_BUBBLE_STYLE
+}
 const assumptions = atom({ plugin: 'clickbar', key: 'assumptions' } as const, [])
 const syncStatus = atom({ plugin: 'clickbar', key: 'syncStatus' } as const, null)
 const progress = atom({ plugin: 'clickbar', key: 'turnProgress' } as const, { files: 0, tools: 0 })
@@ -389,11 +397,11 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'bubbles',
-      description: '대화에서 내 질문을 회색 말풍선으로 표시합니다. /bubbles off로 끌 수 있습니다',
-      argumentHint: '[on|off]',
+      description: '대화에서 내 질문을 카드로 표시해 답변과 구분합니다. /bubbles card·bar·mark·off로 모양을 고릅니다',
+      argumentHint: '[card|bar|mark|off]',
       immediate: true,
     })
-    bubbles = (await $.store.get(BUBBLES_SWITCH_KEY)) !== 'off'
+    bubbleStyle = bubbleStyleOf(await $.store.get(BUBBLES_SWITCH_KEY))
     theme = String((await $.config.list().catch(() => [])).find(row => row.key === 'theme')?.value ?? '')
     await $.command.register({
       name: 'assumptions',
@@ -501,14 +509,15 @@ export const register: Register = on => {
 
   on('command.run', { command: 'bubbles' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
-    if (arg === 'off' || arg === 'on') {
-      await $.store.set(BUBBLES_SWITCH_KEY, arg)
-      bubbles = arg === 'on'
+    const choice = arg === 'on' ? DEFAULT_BUBBLE_STYLE : arg
+    if (choice === 'off' || (BUBBLE_STYLES as readonly string[]).includes(choice)) {
+      await $.store.set(BUBBLES_SWITCH_KEY, choice)
+      bubbleStyle = bubbleStyleOf(choice)
       // 이미 그려진 질문도 바로 바뀌도록 다시 그린다
       $.ui.invalidate('ui.render')
-      $.ui.toast(arg === 'off' ? '내 질문 말풍선을 껐습니다' : '내 질문 말풍선을 켰습니다')
+      $.ui.toast(bubbleStyle === 'off' ? '내 질문 표시를 껐습니다' : `내 질문을 ${BUBBLE_LABELS[bubbleStyle]} 모양으로 표시합니다`)
     } else {
-      $.ui.toast('/bubbles off로 내 질문 말풍선을 끄고, /bubbles on으로 다시 켭니다')
+      $.ui.toast('/bubbles 뒤에 card(카드) · bar(막대 카드) · mark(표식) · off(끄기) 중 하나를 입력합니다')
     }
 
     return {}
@@ -616,19 +625,37 @@ export const register: Register = on => {
     return next({ ...e, props: { ...e.props, suffix: ` · ${extra}${e.props.suffix}` } })
   })
 
-  // 내가 보낸 질문은 회색으로 칠한 말풍선으로 그린다. Claude의 답은 칠하지 않은 글 그대로라 둘이 한눈에 갈린다.
-  // 테두리 글자(╭─╮│) 대신 배경을 칠해, 마우스로 끌어 복사해도 질문 글만 따라온다. 읽는 흐름이 끊기지 않게 왼쪽에 붙이고,
-  // 위에만 빈 줄을 둬서 질문이 앞의 답과 떨어지고 뒤따르는 제 답과 한 덩어리로 보이게 한다.
+  // 내가 보낸 질문을 Claude의 답과 갈리게 그린다(레퍼런스: Codex CLI의 전체 폭 카드, opencode의 카드+왼쪽 막대, Gemini CLI의 ❯ 표식).
+  // 카드는 대화 칸 전체 폭에 위아래 한 줄 여백을 둬서 글 길이와 상관없이 한 덩어리로 보인다. 엔진은 앞 턴의 마지막 줄(✻ … done)과
+  // 내 질문 사이를 띄우지 않으므로 위에 한 줄을 띄운다.
   // ctrl+o 전체 기록, 터미널이 아닌 화면, 다른 세션·알림이 보낸 글은 엔진이 그린 그대로 둔다
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const kind = e.props.origin.kind
     const text = e.props.text.replace(/\s+$/, '')
-    if (!bubbles || e.surface !== 'terminal' || e.props.isExpanded || (kind !== 'composer' && kind !== 'bridge') || text === '') return next(e)
+    if (bubbleStyle === 'off' || e.surface !== 'terminal' || e.props.isExpanded || (kind !== 'composer' && kind !== 'bridge') || text === '') return next(e)
     const { Box, Text } = $.ui.resolve(e)
+    if (bubbleStyle === 'mark') {
+      // 배경 없이 색 있는 ❯ 뒤에 흐린 글: 내 말은 한발 물러나고 Claude의 답이 앞으로 나온다
+      return (
+        <Box flexDirection="row" columnGap={1} marginTop={1}>
+          <Box flexShrink={0}>
+            <Text color="suggestion" bold>
+              ❯
+            </Text>
+          </Box>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text dimColor wrap="wrap">
+              {text}
+            </Text>
+          </Box>
+        </Box>
+      )
+    }
 
     return (
-      <Box flexDirection="row" marginTop={1} width={BUBBLE_MAX_WIDTH}>
-        <Box backgroundColor={BUBBLE_FILL[theme] ?? 'userMessageBackground'} paddingX={1}>
+      <Box flexDirection="row" marginTop={1}>
+        {bubbleStyle === 'bar' && <Box width={1} flexShrink={0} backgroundColor="suggestion" />}
+        <Box flexGrow={1} flexShrink={1} backgroundColor={BUBBLE_BAND[theme] ?? 'userMessageBackground'} paddingX={2} paddingY={1}>
           <Text wrap="wrap">{text}</Text>
         </Box>
       </Box>
