@@ -354,25 +354,25 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'palette',
-      description: '명령 팔레트: 슬래시 명령을 한국어 설명과 함께 보고 클릭으로 실행',
+      description: '명령 팔레트를 엽니다. 명령·스킬·단축키·대화 기록을 한국어 설명과 함께 찾고 바로 실행합니다',
       immediate: true,
     })
     // Claude가 일하는 중에도 끊지 않고 보관할 수 있도록 immediate로 둔다
     await $.command.register({
       name: 'idea',
-      description: '아이디어 보관함: /idea 내용 → 이 프로젝트에 보관, /idea만 치면 보관함을 연다',
+      description: '아이디어를 프로젝트별 보관함에 저장합니다. 내용 없이 실행하면 보관함을 엽니다',
       argumentHint: '[보관할 내용]',
       immediate: true,
     })
     await $.command.register({
       name: 'tips',
-      description: '명령 추천: 질문 문장에서 바로 쓸 수 있는 명령을 알려 준다. /tips off로 끄기',
+      description: '질문에 맞는 내장 명령을 한 번씩 추천합니다. /tips off로 끌 수 있습니다',
       argumentHint: '[on|off]',
       immediate: true,
     })
     await $.command.register({
       name: 'assumptions',
-      description: 'Claude 짐작 확인: Claude가 묻지 않고 짐작해서 정한 것 목록. /assumptions off로 끄기, on으로 켜기(다음 세션부터)',
+      description: 'Claude가 확인 없이 정한 가정을 검토하고 바로잡습니다. /assumptions off·on으로 끄고 켭니다(다음 세션부터 적용)',
       argumentHint: '[on|off]',
       immediate: true,
     })

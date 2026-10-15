@@ -600,7 +600,7 @@ export const register: Register = on => {
     const result = await next(e)
     await $.command.register({
       name: 'sessions-here',
-      description: '같은 폴더의 다른 Claude 세션 보기. /sessions-here off로 Claude에게 알리는 안내 끄기, on으로 켜기',
+      description: '같은 폴더에서 실행 중인 다른 세션을 확인합니다. /sessions-here off·on으로 Claude에게 보내는 안내를 끄고 켭니다',
       argumentHint: '[on|off]',
       immediate: true,
     })
@@ -622,13 +622,13 @@ export const register: Register = on => {
       if ((await findSyncScript($)) === undefined) return
       await $.command.register({
         name: 'sync',
-        description: '동기화: 설정 저장소(CCsetting)와 메모리·mod·설정을 지금 주고받는다',
+        description: '설정 저장소(CCsetting)와 메모리·mod·설정을 즉시 동기화합니다',
         immediate: true,
       })
     })
     await $.command.register({
       name: 'sessions',
-      description: '세션 패널: 이 PC의 Claude 세션을 폴더별로 보고, 이동을 누르면 그 Orca 탭으로 전환',
+      description: '세션 패널을 엽니다. 이 PC의 모든 대화를 폴더·날짜별로 보고 이동·고정·보관합니다',
       immediate: true,
     })
 
