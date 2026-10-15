@@ -4,7 +4,7 @@ import { cardText, countPatch, editDelta, roughDelta } from '../hooks/card'
 import { ASSUME_TOOL, correctionPrompt } from '../hooks/assumptions'
 import { promptsFromTranscript } from '../hooks/prompts'
 import { unfence } from '../hooks/replies'
-import { bar, kTokens, limitView, untilText, usdText, viewOf } from '../hooks/meter'
+import { bar, cells, itemCells, kTokens, limitView, untilText, usdText, viewOf } from '../hooks/meter'
 import { SYNC_STALE_MS, parseSyncStatus, syncView } from '../hooks/sync'
 import { keyGroupsFor, platformOf } from '../hooks/catalog'
 import type { Platform } from '../hooks/catalog'
@@ -31,23 +31,24 @@ test('미터는 자동 압축 임계값 기준으로 계산하고, 꺼져 있으
   expect(kTokens(800)).toBe('800')
 })
 
-test('한도는 band에 사용 비율과 초기화 시각만, 팔레트에는 남은 시간까지 보여 주고, 초기화 시각이 지나면 0%로 바꾼다', async () => {
+test('한도는 band에 사용 비율과 초기화 시각만, 팔레트에는 요일과 남은 시간까지 보여 주고, 초기화 시각이 지나면 0%로 바꾼다', async () => {
   const now = Date.parse('2026-10-08T05:00:00Z')
   const low = limitView({ kind: 'five_hour', percentUsed: 31.4, resetsAt: '2026-10-08T07:10:00Z' }, now)
   // 시각은 실행 환경의 현지 시각이라 숫자 자리는 정규식으로 본다
-  expect(low.text).toMatch(/^5시간 31% \(\d\d:10\)$/)
-  expect(low.short).toMatch(/^5시간 31% \(\d\d:10\)$/)
-  expect(low.isHigh).toBe(false)
-  expect(low.detail).toMatch(/^5시간 31% · \d\d:10 초기화\(2시간 10분 뒤\)$/)
+  expect(low).toMatchObject({ name: '5시간', percent: 31, isHigh: false, tone: 'normal' })
+  expect(low.reset).toMatch(/^\d\d:10$/)
+  expect(low.detail).toMatch(/^\d\d:10 초기화 · 2시간 10분 뒤$/)
   const high = limitView({ kind: 'seven_day', percentUsed: 92, resetsAt: '2026-10-11T05:00:00Z' }, now)
-  expect(high.short).toMatch(/^주간 92% \(10\/11 \d\d:00\)$/)
-  expect(high.text).toMatch(/^주간 92% \(10\/11\(일\) \d\d:00\)$/)
-  // 팔레트 한 줄에 둘을 놓으므로 요일을 뺀다
-  expect(high.detail).toMatch(/^주간 92% · 10\/11 \d\d:00 초기화\(3일 0시간 뒤\)$/)
+  // band는 한 줄에 모두 두므로 요일을 빼고, 팔레트는 요일을 붙인다
+  expect(high.reset).toMatch(/^10\/11 \d\d:00$/)
+  expect(high.detail).toMatch(/^10\/11\(일\) \d\d:00 초기화 · 3일 0시간 뒤$/)
   expect(high.tone).toBe('bad')
   const past = limitView({ kind: 'five_hour', percentUsed: 88, resetsAt: '2026-10-08T04:00:00Z' }, now)
-  expect(past.short).toBe('5시간 0%')
-  expect(past.isHigh).toBe(false)
+  expect(past).toMatchObject({ percent: 0, reset: '', isHigh: false, tone: 'normal' })
+  // 칸 수: 한글은 두 칸, 막대·숫자·기호는 한 칸. 위험(bad)이면 앞의 !와 빈칸 한 칸이 더해진다
+  expect(cells('5시간 █░')).toBe(8)
+  expect(itemCells({ key: 'k', name: '주간', bar: '█████', figure: '92%', note: '(10/11 14:00)', tone: 'bad' })).toBe(2 + 4 + 1 + 5 + 1 + 3 + 1 + 13)
+  expect(itemCells({ key: 'k', name: 'API 환산', bar: '', figure: '≈$3.84', note: '', tone: 'normal' })).toBe(8 + 1 + 6)
   expect(untilText(30 * 3600000)).toBe('1일 6시간')
   expect(usdText(1.234)).toBe('≈$1.23')
   expect(usdText(27.1)).toBe('≈$27')
@@ -165,6 +166,39 @@ test('band: compact 버튼은 /compact를 실행하고, 좁으면 tasks·fork를
   expect(ran).toEqual(['compact', 'compact', 'resume'])
 })
 
+test('band 상태 줄: 항목마다 이름·막대·비율을 묶고, 위험이면 !와 색을, API 환산액은 한 줄에 들어갈 때만 붙인다', async ($, on) => {
+  const live = {
+    startedAt: 0,
+    context: { window: 1000000, tokens: 500000 },
+    rateLimits: [
+      { kind: 'five_hour' as const, percentUsed: 31, resetsAt: '2026-10-08T08:00:00Z' },
+      { kind: 'seven_day' as const, percentUsed: 95, resetsAt: '2026-10-11T05:00:00Z' },
+    ],
+    cost: { usd: 3.84 },
+  }
+  on('clock.now', () => ({ value: Date.parse('2026-10-08T05:00:00Z') }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({ value: live }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  await $.session.measure({ context: live.context, rateLimits: live.rateLimits, cost: live.cost, changed: ['context', 'rateLimits', 'cost'] })
+
+  const wide = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(160) })
+  expect(await wide.find({ type: 'Text', text: '5시간' })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: '██░░░' })).toBeDefined()
+  expect((await wide.find({ type: 'Text', text: '95%' }))?.props.color).toBe('error')
+  expect(await wide.find({ type: 'Text', text: /^!$/ })).toBeDefined()
+  expect(await wide.find({ key: 'band-meter-cost' })).toBeDefined()
+  // "사용량" 낱말과 │ 구분 기호는 쓰지 않는다
+  expect(await wide.find({ type: 'Text', text: /사용량|│ API/ })).toBe(undefined)
+  await wide.unmount()
+  // 넓은 band의 가장 좁은 폭(110칸)에서는 컨텍스트와 한도까지만 한 줄에 두고 API 환산액은 뺀다
+  const tight = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(110) })
+  expect(await tight.find({ key: 'band-limit-seven_day' })).toBeDefined()
+  expect(await tight.find({ key: 'band-meter-cost' })).toBe(undefined)
+  await tight.unmount()
+})
+
 test('quote는 선택한 글을 인용 블록으로 넣고, btw는 쓰던 글을 질문으로 남긴다', async ($, on) => {
   const filled: { text: string; mode: string }[] = []
   on('clock.now', () => ({ value: 0 }))
@@ -221,7 +255,7 @@ test('팔레트는 한국어 설명을 보여주고, ▶는 실행하되 인자�
   expect(await ui.find({ key: 'etc-run-my-skill' })).toBeDefined()
   // 설치한 스킬은 용도별 묶음에 한국어 설명으로 나오고, 설치되지 않은 스킬 묶음은 보이지 않는다
   expect(await ui.find({ type: 'Text', text: '스킬 · 개발 방법' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^테스트를 먼저 쓰고/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^테스트를 먼저 작성하고/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '스킬 · 문서와 파일' })).toBe(undefined)
   await ui.press({ key: 'fav-run-rewind' })
   await ui.press({ key: 'fav-run-btw' })
@@ -295,7 +329,7 @@ test('팔레트 탭: 단축키는 설치된 명령에만 ▶를 달고, 답변 �
   await ui.input({ key: 'search', text: '되감기', kind: 'change' })
   expect(await ui.find({ type: 'Text', text: 'Esc Esc' })).toBeDefined()
   await ui.input({ key: 'search', text: 'zzz', kind: 'change' })
-  expect(await ui.find({ type: 'Text', text: '찾는 단축키가 없습니다' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '일치하는 단축키가 없습니다' })).toBeDefined()
   await ui.input({ key: 'search', text: '', kind: 'change' })
 
   await ui.press({ key: 'tab-replies' })
@@ -347,7 +381,7 @@ test('fork 버튼은 무엇이 생겼는지 토스트로 알려 준다', async (
   expect(toasts).toEqual(['fork: session waiting for a prompt · 사본 · c7d937ba · 지금 대화는 그대로 이어집니다'])
 })
 
-test('아이디어 보관함: /idea로 보관하면 프로젝트별로 저장되고, 보관함의 ▶는 입력창에 넣기만 한다', async ($, on) => {
+test('아이디어 탭: /idea로 보관하면 프로젝트별로 저장되고, [입력창에]는 입력창에 넣기만 한다', async ($, on) => {
   const store = new Map<string, unknown>()
   const filled: { text: string; mode: string }[] = []
   on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
@@ -391,7 +425,7 @@ test('아이디어 보관함: /idea로 보관하면 프로젝트별로 저장되
   expect((store.get('ideas:D:\all') as { text: string }[]).map(x => x.text)).toEqual(['쓰던 글', '타임라인 기능 검토'])
 })
 
-test('짐작 탭: "남은 것 모두 맞음"은 열린 것을 맞음으로 바꾸고, "목록 비우기"는 목록을 비운다', async ($, on) => {
+test('가정 탭: "나머지 모두 맞음"은 열린 것을 맞음으로 바꾸고, "목록 비우기"는 목록을 비운다', async ($, on) => {
   on('clock.now', () => ({ value: Date.parse('2026-10-10T05:00:00Z') }))
   on('store.get', () => ({ value: undefined }))
   on('command.list', () => ({ value: [] }))
@@ -488,7 +522,7 @@ test('가정 기록을 꺼 두면 세션 시작 때 도구를 등록하지 않�
   expect(registered).toEqual(['log_assumption'])
 })
 
-test('보관함의 Send는 보낸 것이 확인된 뒤에만 아이디어를 지운다', async ($, on) => {
+test('아이디어 탭의 [보내기]는 보낸 것이 확인된 뒤에만 아이디어를 지운다', async ($, on) => {
   const store = new Map<string, unknown>([['ideas:D:\all', [{ text: '첫째', at: 1 }, { text: '둘째', at: 2 }]]])
   let accept = false
   on('clock.now', () => ({ value: 3 }))
@@ -571,7 +605,7 @@ test('내 질문: 보낸 질문만 모아 보여 주고, 이동이 안 되면 �
   await ui.press({ key: 'prompt-jump-0' })
   await ui.unmount()
   // 테스트 환경에는 대화 행이 그려져 있지 않아 이동은 거절된다. 실제 이동은 화면에서 확인한다
-  expect(toasts).toEqual(['그 질문 위치로 갈 수 없습니다. 압축 이전 대화이거나 화면에 그려지지 않은 질문입니다'])
+  expect(toasts).toEqual(['해당 질문 위치로 이동할 수 없습니다. 압축 이전 대화이거나 화면에 표시되지 않은 질문입니다'])
 })
 
 test('명령 추천: 질문 문장이 내장 명령과 맞으면 한 번만 알려 주고, 질문은 바꾸지 않는다', async ($, on) => {
@@ -587,7 +621,7 @@ test('명령 추천: 질문 문장이 내장 명령과 맞으면 한 번만 알�
   await $.prompt.submit({ text: '로그인 화면 만들어 줘', wait: false, origin: { kind: 'composer' } })
   expect('text' in r1 && r1.text).toBe('컨텍스트 좀 압축해 줘')
   expect(toasts).toHaveLength(1)
-  expect(toasts[0]).toMatch(/^팁: \/compact 명령으로 바로 할 수 있습니다\. 대화를 요약해/)
+  expect(toasts[0]).toMatch(/^팁: \/compact 명령으로 바로 실행할 수 있습니다\. 대화를 요약해/)
 })
 
 test('/ 메뉴: 엔진 내장 명령의 설명만 한국어로 바꾼다', async ($, on) => {

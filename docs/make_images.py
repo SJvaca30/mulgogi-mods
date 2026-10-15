@@ -1,45 +1,52 @@
-"""mulgogi-mods README용 화면 그림(SVG)을 만든다. 실행: python docs/make_images.py
+"""mulgogi-mods README용 화면 그림(PNG)을 만든다. 실행: python docs/make_images.py
 
+터미널 화면을 HTML로 다시 그린 뒤 헤드리스 Edge(또는 Chrome)로 2배 해상도 PNG를 찍는다.
 실제 화면 배치·문구를 따르되 대화 이름·폴더는 예시로 바꾼다(공개 저장소라 실제 이름을 쓰지 않는다).
 팔레트 설명은 clickbar/hooks/catalog.ts에서 그대로 읽는다. 밝은 판·어두운 판을 함께 만든다.
+
+준비물
+- 글꼴: D2Coding(OFL 1.1). 한글이 영문의 정확히 두 배 폭이라 터미널처럼 열이 맞는다.
+  D2CODING_DIR 환경 변수에 D2Coding-*.ttf·D2CodingBold-*.ttf가 있는 폴더를 넣거나, 글꼴을 설치해 둔다.
+  글꼴은 PNG에 그려질 뿐 저장소에 들어가지 않는다.
+- 브라우저: Edge나 Chrome. 기본 설치 경로를 찾고, 없으면 BROWSER 환경 변수로 실행 파일을 지정한다.
 """
+import glob
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import unicodedata
 from html import escape
+from pathlib import Path
 
-# 저장소 루트(이 파일은 docs/ 안에 있다)
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'docs', 'images')
-os.makedirs(OUT, exist_ok=True)
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / 'docs' / 'images'
 
-FONT = "'D2Coding','JetBrains Mono','Cascadia Mono',Consolas,'Noto Sans Mono CJK KR','Malgun Gothic',monospace"
-CW, LH, FS = 8.4, 20, 14  # 글자 칸 폭, 줄 높이, 글자 크기(px)
-PAD_X, PAD_TOP, BAR_H = 18, 14, 34
+FS, CW, LH = 14, 7.0, 20  # 글자 크기, 칸 폭(D2Coding 영문은 0.5em), 줄 높이(px)
+COLS = 120  # 그림 하나의 터미널 폭(칸). 세 그림을 같은 폭으로 맞춘다
+PAD_X, PAD_Y, BAR_H = 20, 16, 38  # 본문 안쪽 여백, 창 제목 줄 높이
+MARGIN = (16, 24, 40)  # 창 바깥 여백(위, 좌우, 아래). 그림자가 잘리지 않게 둔다
 
 THEMES = {
-    'dark': dict(bg='#16181d', chrome='#22252b', border='#30343c', title='#8b919c', text='#e6e8eb', dim='#8b919c',
-                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#e08a68', inverse='#16181d',
-                 rule='#4a4f59', shadow='rgba(0,0,0,.45)'),
-    'light': dict(bg='#ffffff', chrome='#f1f3f5', border='#d9dde3', title='#6e7781', text='#1f2328', dim='#6e7781',
-                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', inverse='#ffffff',
-                  rule='#c2c7cf', shadow='rgba(31,35,40,.12)'),
+    'light': dict(bg='#ffffff', chrome='#f3f4f6', border='#d8dce2', title='#57606a', text='#1f2328', dim='#6e7781',
+                  sug='#5769f7', succ='#2c7a39', warn='#966c1e', err='#ab2b3f', claude='#c4633f', auto='#8700ff',
+                  inverse='#ffffff', rule='#c9ced6', shadow='rgba(31,35,40,.18)', shadow2='rgba(31,35,40,.08)'),
+    'dark': dict(bg='#17191e', chrome='#22252b', border='#343943', title='#9aa1ac', text='#e6e8eb', dim='#8b919c',
+                 sug='#b1b9f9', succ='#4eba65', warn='#ffc107', err='#ff6b80', claude='#d77757', auto='#af87ff',
+                 inverse='#17191e', rule='#454b55', shadow='rgba(0,0,0,.55)', shadow2='rgba(0,0,0,.3)'),
 }
 
 
-def wide(ch):
-    return unicodedata.east_asian_width(ch) in 'WF'
-
-
-def width(s):
-    return sum(2 if wide(c) else 1 for c in s)
+def cells(s):
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in s)
 
 
 def wrap(s, cols):
     out, line = [], ''
     for word in s.split(' '):
         cand = word if line == '' else line + ' ' + word
-        if width(cand) <= cols:
+        if cells(cand) <= cols:
             line = cand
         else:
             if line:
@@ -51,13 +58,15 @@ def wrap(s, cols):
 
 
 def catalog():
-    src = open(os.path.join(ROOT, 'clickbar', 'hooks', 'catalog.ts'), encoding='utf-8').read()
+    src = (ROOT / 'clickbar' / 'hooks' / 'catalog.ts').read_text(encoding='utf-8')
     return {m.group(1): m.group(2) for m in re.finditer(r"\{ name: '([^']+)', ko: '([^']*)' \}", src)}
 
 
-# 줄 = [(열, 글, 모양)] 모양: text·dim·sug·succ·warn·claude·rule, 접미사 b(굵게)·u(밑줄)·spin·cursor·badge-<색>
 class Screen:
-    def __init__(self, cols):
+    """줄 = [(열, 글, 모양)]. 모양: text·dim·sug·succ·warn·err·claude·auto·rule에
+    b(굵게)·u(밑줄)·chip(그 색으로 칠한 칸, 글자는 바탕색)·cursor를 붙인다"""
+
+    def __init__(self, cols=COLS):
         self.cols = cols
         self.lines = []
 
@@ -69,68 +78,138 @@ class Screen:
         segs, c = [], col
         for text, style in parts:
             segs.append((c, text, style))
-            c += width(text)
+            c += cells(text)
         self.lines.append(segs)
 
     def blank(self):
         self.lines.append([])
 
 
-def render(screen, theme, title, path, rows_extra=0):
-    t = THEMES[theme]
-    w = round(PAD_X * 2 + screen.cols * CW)
-    h = round(BAR_H + PAD_TOP * 2 + (len(screen.lines) + rows_extra) * LH)
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h + 16}" viewBox="0 0 {w} {h + 16}" role="img" aria-label="{escape(title)}">',
-           '<style>',
-           f'text{{font-family:{FONT};font-size:{FS}px;white-space:pre}}',
-           '.b{font-weight:700}.u{text-decoration:underline}',
-           '@keyframes pulse{50%{opacity:.25}}.spin{animation:pulse 1.6s ease-in-out infinite}',
-           '@keyframes blink{50%{opacity:0}}.cursor{animation:blink 1.1s steps(1) infinite}',
-           '@media (prefers-reduced-motion:reduce){.spin,.cursor{animation:none}}',
-           '</style>',
-           f'<rect x="1" y="5" width="{w - 2}" height="{h}" rx="11" fill="{t["shadow"]}" opacity=".6"/>',
-           f'<rect x="1" y="1" width="{w - 2}" height="{h}" rx="10" fill="{t["bg"]}" stroke="{t["border"]}"/>',
-           f'<path d="M1 11a10 10 0 0 1 10-10h{w - 22}a10 10 0 0 1 10 10v{BAR_H - 10}h-{w - 2}z" fill="{t["chrome"]}"/>',
-           f'<line x1="1" y1="{BAR_H + 1}" x2="{w - 1}" y2="{BAR_H + 1}" stroke="{t["border"]}"/>']
-    for i, color in enumerate(['#ff5f57', '#febc2e', '#28c840']):
-        out.append(f'<circle cx="{20 + i * 18}" cy="{BAR_H / 2 + 1}" r="5.5" fill="{color}"/>')
-    out.append(f'<text x="{w / 2}" y="{BAR_H / 2 + 6}" text-anchor="middle" fill="{t["title"]}" style="font-size:12.5px">{escape(title)}</text>')
-    y0 = BAR_H + PAD_TOP + 15
-    for r, segs in enumerate(screen.lines):
-        y = y0 + r * LH
-        for col, text, style in segs:
-            parts = style.split()
-            color = t.get(parts[0], t['text'])
-            cls = ' '.join(p for p in parts[1:] if p in ('b', 'u', 'spin', 'cursor'))
-            x = PAD_X + col * CW
-            badge = next((p for p in parts if p.startswith('badge-')), None)
-            if badge:
-                out.append(f'<rect x="{x:.1f}" y="{y - 15}" width="{width(text) * CW:.1f}" height="{LH - 1}" rx="3" fill="{t[badge[6:]]}"/>')
-                color = t['inverse']
-            if 'cursor' in parts:
-                out.append(f'<rect class="cursor" x="{x:.1f}" y="{y - 14}" width="{CW:.1f}" height="17" fill="{t["text"]}"/>')
-                continue
-            # 글자 폭이 섞인 글은 같은 폭끼리 나눠 칸에 맞춘다(보는 PC의 글꼴과 상관없이 열이 맞도록)
-            c = 0
-            for m in re.finditer(r'[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]+|[^\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]+', text):
+# 칸에 맞춰 직접 그리는 글자: 가로줄·세로줄은 선으로, 막대는 칸을 채운 사각형으로 그린다
+SPECIAL = re.compile(r'(─+|│|█+|░+)')
+# D2Coding에 없거나 폭이 다른 기호는 한 글자씩 칸 가운데에 놓는다
+SAFE = re.compile(r"[\x20-\x7e\uac00-\ud7a3]+")
+
+
+def draw_segment(out, x, text, style, t):
+    parts = style.split()
+    color = t.get(parts[0], t['text'])
+    weight = 700 if 'b' in parts else 400
+    deco = 'underline' if 'u' in parts else 'none'
+    w = cells(text) * CW
+    if 'cursor' in parts:
+        out.append(f'<i class="blk" style="left:{x:.1f}px;width:{CW:.1f}px;top:2px;height:16px;background:{t["text"]}"></i>')
+        return
+    if 'chip' in parts:
+        out.append(f'<i class="blk" style="left:{x:.1f}px;width:{w:.1f}px;top:1px;height:18px;border-radius:4px;background:{color}"></i>')
+        color = t['inverse']
+    c = 0
+    for piece in SPECIAL.split(text):
+        if piece == '':
+            continue
+        px = x + c * CW
+        pw = cells(piece) * CW
+        if piece[0] == '─':
+            out.append(f'<i class="blk" style="left:{px:.1f}px;width:{pw:.1f}px;top:9.5px;height:1px;background:{color}"></i>')
+        elif piece == '│':
+            out.append(f'<i class="blk" style="left:{px + CW / 2 - .5:.1f}px;width:1px;top:3px;height:14px;background:{color}"></i>')
+        elif piece[0] in '█░':
+            alpha = 1 if piece[0] == '█' else .22
+            out.append(f'<i class="blk" style="left:{px:.1f}px;width:{pw:.1f}px;top:5px;height:10px;background:{color};opacity:{alpha}"></i>')
+        else:
+            cc = 0
+            for m in re.finditer(r"[\x20-\x7e\uac00-\ud7a3]+|.", piece):
                 run = m.group(0)
-                rw = width(run)
-                xr = x + c * CW
-                attrs = f'x="{xr:.1f}" y="{y}" fill="{color}"'
-                if run.strip() and (rw > 1 or wide(run[0])):
-                    attrs += f' textLength="{rw * CW:.1f}" lengthAdjust="spacingAndGlyphs"'
-                cl = f' class="{cls}"' if cls else ''
-                out.append(f'<text {attrs}{cl}>{escape(run)}</text>')
-                c += rw
-    out.append('</svg>')
-    open(path, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
+                rx = px + cc * CW
+                rw = cells(run) * CW
+                body = escape(run)
+                if SAFE.fullmatch(run):
+                    out.append(f'<span style="left:{rx:.1f}px;color:{color};font-weight:{weight};text-decoration:{deco}">{body}</span>')
+                else:
+                    out.append(f'<span class="sym" style="left:{rx:.1f}px;width:{rw:.1f}px;color:{color};font-weight:{weight}">{body}</span>')
+                cc += cells(run)
+        c += cells(piece)
+
+
+def html_page(screen, theme, title, fonts):
+    t = THEMES[theme]
+    term_w = round(PAD_X * 2 + screen.cols * CW)
+    term_h = round(PAD_Y * 2 + len(screen.lines) * LH)
+    top, side, bottom = MARGIN
+    page_w, page_h = term_w + side * 2, top + BAR_H + term_h + bottom
+    face = ''.join(f"@font-face{{font-family:'Term';src:url('{Path(p).as_uri()}');font-weight:{wt}}}" for wt, p in fonts.items())
+    rows = []
+    for r, segs in enumerate(screen.lines):
+        out = []
+        for col, text, style in segs:
+            draw_segment(out, col * CW, text, style, t)
+        rows.append(f'<div class="ln" style="top:{PAD_Y + r * LH}px">{"".join(out)}</div>')
+    # 창 조절 단추(최소화·최대화·닫기)는 Windows 11 모양을 단순한 선으로 그린다
+    ctl = (f'<svg viewBox="0 0 46 38"><path d="M18 19h10" stroke="{t["title"]}" stroke-width="1"/></svg>'
+           f'<svg viewBox="0 0 46 38"><rect x="18.5" y="14.5" width="9" height="9" rx="1.5" fill="none" stroke="{t["title"]}"/></svg>'
+           f'<svg viewBox="0 0 46 38"><path d="M18.5 14.5l9 9M27.5 14.5l-9 9" stroke="{t["title"]}"/></svg>')
+    html = f'''<!doctype html><html><head><meta charset="utf-8"><style>
+{face}
+html,body{{margin:0;background:transparent}}
+body{{width:{page_w}px;height:{page_h}px;overflow:hidden}}
+.win{{position:absolute;left:{side}px;top:{top}px;width:{term_w}px;border-radius:12px;overflow:hidden;background:{t["bg"]};
+  box-shadow:0 0 0 1px {t["border"]},0 22px 44px -14px {t["shadow"]},0 4px 14px {t["shadow2"]}}}
+.bar{{height:{BAR_H}px;background:{t["chrome"]};border-bottom:1px solid {t["border"]};position:relative;display:flex;justify-content:flex-end}}
+.bar svg{{width:46px;height:{BAR_H}px}}
+.title{{position:absolute;inset:0;text-align:center;font:500 12.5px/{BAR_H}px 'Pretendard','Segoe UI','Malgun Gothic',sans-serif;color:{t["title"]};letter-spacing:.1px}}
+.term{{position:relative;height:{term_h}px;font-family:'Term',monospace;font-size:{FS}px;line-height:{LH}px;
+  -webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}}
+.ln{{position:absolute;left:{PAD_X}px;right:0;height:{LH}px}}
+.ln span{{position:absolute;top:0;white-space:pre}}
+.ln .sym{{text-align:center;overflow:visible}}
+.blk{{position:absolute;display:block}}
+</style></head><body><div class="win"><div class="bar"><div class="title">{escape(title)}</div>{ctl}</div>
+<div class="term">{"".join(rows)}</div></div></body></html>'''
+    return html, page_w, page_h
+
+
+def find_fonts():
+    dirs = [os.environ.get('D2CODING_DIR', ''), os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'Windows', 'Fonts'),
+            os.path.expanduser('~/Library/Fonts'), '/Library/Fonts', os.path.expanduser('~/.local/share/fonts'), '/usr/share/fonts']
+    for d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        regular = [p for p in glob.glob(os.path.join(d, '**', 'D2Coding*.tt[fc]'), recursive=True) if 'Bold' not in p and 'ligature' not in p.lower()]
+        bold = [p for p in glob.glob(os.path.join(d, '**', 'D2CodingBold*.ttf'), recursive=True) if 'ligature' not in p.lower()]
+        if regular:
+            return {400: regular[0], 700: (bold or regular)[0]}
+    sys.exit('D2Coding 글꼴을 찾지 못했습니다. D2CODING_DIR에 D2Coding-*.ttf가 있는 폴더를 지정하세요')
+
+
+def find_browser():
+    names = [os.environ.get('BROWSER', ''),
+             r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+             r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+             '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+             '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/microsoft-edge']
+    for n in names:
+        if n and os.path.isfile(n):
+            return n
+    sys.exit('Edge나 Chrome을 찾지 못했습니다. BROWSER에 실행 파일 경로를 지정하세요')
+
+
+def shoot(browser, html, w, h, png):
+    with tempfile.TemporaryDirectory() as tmp:
+        page = Path(tmp) / 'page.html'
+        page.write_text(html, encoding='utf-8')
+        # 따로 만든 빈 프로필로 띄워, 열려 있는 브라우저와 그 설정을 건드리지 않는다
+        subprocess.run([browser, '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', f'--user-data-dir={tmp}/profile',
+                        '--force-device-scale-factor=2', '--default-background-color=00000000', f'--window-size={w},{h}',
+                        f'--screenshot={png}', page.as_uri()], check=True, capture_output=True, timeout=120)
 
 
 KO = catalog()
 
-# ---------- 1. 첫 화면: 대화 + 입력창 위 줄(band) ----------
+
+# ---------- 1. 첫 화면: 대화와 입력창 위 줄(band) ----------
 def hero():
-    s = Screen(112)
+    s = Screen()
     s.flow(('❯ ', 'dim'), ('결제 실패 시 재시도 로직을 추가해 줘', 'text'))
     s.blank()
     s.flow(('● ', 'text'), ('재시도 정책을 PaymentService에 추가하고 테스트 3개를 함께 넣었습니다.', 'text'))
@@ -140,41 +219,46 @@ def hero():
     s.blank()
     s.flow(('❯ ', 'dim'), ('환불 API에도 같은 방식으로 적용해 줘', 'text'))
     s.blank()
-    s.flow(('✶', 'claude spin'), (' Pondering…', 'claude'), (' (8s · ↓ 1.2k tokens)', 'dim'))
-    s.flow(('── clickbar ' + '─' * (106 - 12), 'rule'), (' [-]', 'dim'))
-    s.flow(('컨텍스트 ███████░░░ 68% (자동 압축까지 290k)', 'dim'), (' │ 사용량', 'dim'), (' 5시간 31% (17:00)', 'dim'),
-           (' 주간 46% (내일 23:00)', 'dim'), (' │ API 환산 ≈$3.84', 'dim'))
+    s.flow(('✶', 'claude'), (' Pondering…', 'claude'), (' (8s · ↓ 1.2k tokens)', 'dim'))
+    s.flow(('── clickbar ' + '─' * (COLS - 12 - 4), 'rule'), (' [-]', 'dim'))
+    # 상태 줄: 항목마다 이름(기본색) 막대 비율(굵게) (설명, 흐리게), 항목 사이는 세 칸. 60%를 넘은 컨텍스트는 경고색
+    s.flow(('컨텍스트 ', 'text'), ('███████░░░', 'warn'), (' ', 'text'), ('68%', 'warn b'), (' (자동 압축까지 290k)', 'dim'),
+           ('   5시간 ', 'text'), ('██░░░', 'dim'), (' ', 'text'), ('31%', 'text b'), (' (17:00)', 'dim'),
+           ('   주간 ', 'text'), ('██░░░', 'dim'), (' ', 'text'), ('46%', 'text b'), (' (10/17 23:00)', 'dim'),
+           ('   API 환산 ', 'text'), ('≈$3.84', 'text b'))
     s.flow(('[compact] [context]', 'sug'), (' │ ', 'dim'), ('[resume] [sessions] [fork]', 'sug'), (' │ ', 'dim'),
            ('[copy] [quote] [btw]', 'sug'), (' │ ', 'dim'), ('[tasks] [palette]', 'sug'))
-    s.flow(('── 세션 ' + '─' * (106 - 8), 'rule'))
-    s.flow((' 백그라운드 ', 'text b badge-sug'), (' 탭을 닫아도 켜져 있음 · 끄기 /stop │ 같은 폴더 다른 세션 2개:', 'dim'),
-           (' 작업 중 1', 'succ'), (' ("버그 찾아 줘" 3분 전)', 'dim'))
-    s.flow(('· 대기 중 1', 'dim'))
-    s.flow(('─' * (112 - 11) + ' shop-api ─', 'rule'))
+    s.flow(('── 세션 ' + '─' * (COLS - 8), 'rule'))
+    s.flow((' 백그라운드 ', 'sug chip b'), (' 탭을 닫아도 켜져 있음 · 끄기 /stop', 'dim'), (' │ ', 'dim'), ('같은 폴더 다른 세션 2개:', 'dim'),
+           (' 작업 중 1', 'succ'), (' ("버그 찾아 줘" 3분 전)', 'dim'), (' · 대기 중 1', 'dim'))
+    s.flow(('─' * (COLS - 11) + ' shop-api ─', 'rule'))
     s.line((0, '❯ ', 'text'), (2, ' ', 'text cursor'))
-    s.flow(('─' * 112, 'rule'))
-    s.flow(('  ⏵⏵ accept edits on (shift+tab to cycle)', 'dim'))
+    s.flow(('─' * COLS, 'rule'))
+    s.flow(('  ⏵⏵ accept edits on', 'auto'), (' (shift+tab to cycle)', 'dim'))
     return s
 
 
 # ---------- 2. 명령 팔레트 ----------
 def palette():
-    s = Screen(88)
-    s.flow(('[ 명령 ]', 'text b'), (' [단축키] [내 질문] [답변] [보관함] [짐작] [닫기]', 'sug'), (' Esc · Ctrl+X X', 'dim'))
-    s.flow(('5시간 31% · 17:00 초기화(1시간 18분 뒤)   주간 46% · 10/17 23:00 초기화(2일 5시간 뒤)', 'dim'))
-    s.blank()
-    s.flow(('[/명령] 실행 · [넣기] 입력창에 넣기(인자를 붙일 때) · [고정] 맨 위로 · [해제] 고정 풀기', 'dim'))
-    s.blank()
+    s = Screen()
+    # 머리 줄: 왼쪽에 탭(고른 탭은 칠한 칸), 오른쪽 끝에 [닫기]와 닫는 키
+    s.flow((' 명령 ', 'sug chip b'), (' [단축키] [내 질문] [답변] [아이디어] [가정]', 'sug'))
+    s.lines[-1] += [(COLS - 10, '[닫기]', 'sug'), (COLS - 3, 'Esc', 'dim')]
+    # 한도: 한 줄에 하나씩 이름·막대·비율 열을 맞추고 초기화 시각과 남은 시간을 붙인다
+    s.line((0, '5시간', 'text'), (8, '██░░░', 'dim'), (14, ' 31%', 'text b'), (19, '17:00 초기화 · 1시간 18분 뒤', 'dim'))
+    s.line((0, '주간', 'text'), (8, '██░░░', 'dim'), (14, ' 46%', 'text b'), (19, '10/17(금) 23:00 초기화 · 2일 5시간 뒤', 'dim'))
+    s.flow(('[/명령] 실행 · [넣기] 입력창에 넣기(인자 입력용) · [고정] 맨 위에 고정 · [해제] 고정 해제', 'dim'))
     s.flow(('명령 이름이나 설명으로 검색', 'dim'), ('  ⏎ submit', 'dim'))
+    desc_col = 35
 
     def group(title, names, pinned=False):
         s.blank()
         s.flow((title, 'text b'))
         for n in names:
-            desc = wrap(KO[n], 88 - 35)
-            s.line((0, f'[/{n}]', 'sug'), (21, '[넣기]', 'sug'), (28, '[해제]' if pinned else '[고정]', 'warn' if pinned else 'sug'), (35, desc[0], 'dim'))
+            desc = wrap(KO[n], COLS - desc_col)
+            s.line((0, f'[/{n}]', 'sug'), (21, '[넣기]', 'sug'), (28, '[해제]' if pinned else '[고정]', 'warn' if pinned else 'sug'), (desc_col, desc[0], 'dim'))
             for more in desc[1:]:
-                s.line((35, more, 'dim'))
+                s.line((desc_col, more, 'dim'))
 
     group('고정한 명령', ['compact', 'context', 'rewind'], pinned=True)
     group('대화 · 세션', ['resume', 'rename', 'background'])
@@ -184,42 +268,46 @@ def palette():
 
 # ---------- 3. 세션 패널 ----------
 def sessions():
-    s = Screen(88)
-    s.line((0, '대화 24개', 'text b'), (10, '· 켜짐 3', 'dim'), (19, '작업 중 1', 'succ'), (29, '입력 필요 1', 'warn'),
-           (41, '대기 중 1', 'dim'), (51, '· 유휴 21', 'dim'), (70, '[다시 읽기] [닫기]', 'sug'))
-    s.flow(('보기 ', 'dim'), ('[ 폴더별 ]', 'text b'), (' [날짜별]', 'sug'), (' │ 상태 ', 'dim'), ('[ 전체 ]', 'text b'),
-           (' [켜짐] [유휴]', 'sug'), (' │ ', 'dim'), ('[보관함 0]', 'sug'))
+    s = Screen()
+    # 머리 줄: 왼쪽에 보기 탭, 오른쪽 끝에 [다시 읽기]·[닫기]와 닫는 키. 둘째 줄은 개수를 붙인 상태 필터와 상태별 개수
+    s.flow((' 폴더별 ', 'sug chip b'), (' [날짜별] [보관함 1]', 'sug'))
+    s.lines[-1] += [(COLS - 22, '[다시 읽기] [닫기]', 'sug'), (COLS - 3, 'Esc', 'dim')]
+    s.flow(('상태 ', 'dim'), (' 전체 23 ', 'sug chip b'), (' [켜짐 3] [유휴 20]', 'sug'), ('  입력 필요 1', 'warn b'), (' · ', 'dim'),
+           ('작업 중 1', 'succ'), (' · ', 'dim'), ('대기 중 1', 'dim'))
+    manage_col = COLS - 6
 
     def row(action, state, kind, name, manage='[관리]'):
-        a, a_style = action
-        st, st_style = state
-        k, k_style = kind
-        n, n_style = name
-        s.line((0, a, a_style), (9, st, st_style), (20, k, k_style), (32, n, n_style), (82, manage, 'warn' if manage == '[접기]' else 'sug'))
+        s.line((0, *action), (9, *state), (20, *kind), (32, *name), (manage_col, manage, 'warn' if manage == '[접기]' else 'sug'))
 
-    s.blank()
-    s.line((0, '고정 2개', 'text b'), (9, '(켜짐 1 · 유휴 1)', 'dim'))
+    def head(title, count):
+        s.blank()
+        s.flow((title, 'text b'), (' ' + count, 'dim'))
+
+    head('고정', '2개 (켜짐 1 · 유휴 1)')
     row(('[이동]', 'sug'), ('작업 중', 'succ'), ('백그라운드', 'sug'), ('결제 API 리팩터링', 'text u'))
     row(('[열기]', 'sug'), ('2시간 전', 'dim'), ('유휴', 'dim'), ('배포 체크리스트', 'text'))
-    s.blank()
-    s.line((0, 'D:\\work\\shop-api', 'text b'), (17, '9개 (켜짐 2 · 유휴 7)', 'dim'))
-    row(('이 대화', 'sug b'), ('입력 필요', 'warn'), ('포그라운드', 'warn'), ('주간 보고서 작성', 'text b u'))
+    head('D:\\work\\shop-api', '9개 (켜짐 2 · 유휴 7)')
+    row(('이 대화', 'sug b'), ('입력 필요', 'warn b'), ('포그라운드', 'warn'), ('주간 보고서 작성', 'text b u'))
     row(('[이동]', 'sug'), ('대기 중', 'dim'), ('백그라운드', 'sug'), ('로그인 버그 수정', 'text u'), manage='[접기]')
     s.line((9, '[고정] [이름 고치기] [보관] [끄기]', 'sug'))
     row(('[열기]', 'sug'), ('35분 전', 'dim'), ('유휴', 'dim'), ('테스트 커버리지 점검', 'text'))
     row(('[열기]', 'sug'), ('1일 전', 'dim'), ('유휴', 'dim'), ('README 정리', 'text'))
     s.line((9, '[유휴 5개 더 보기]', 'sug'))
-    s.blank()
-    s.line((0, 'D:\\work\\docs', 'text b'), (13, '4개 (켜짐 0 · 유휴 4)', 'dim'))
+    head('D:\\work\\docs', '4개 (켜짐 0 · 유휴 4)')
     row(('[열기]', 'sug'), ('3일 전', 'dim'), ('유휴', 'dim'), ('API 문서 개편', 'text'))
     row(('[열기]', 'sug'), ('5일 전', 'dim'), ('유휴', 'dim'), ('온보딩 가이드 초안', 'text'))
     s.blank()
-    s.flow(('[설명]', 'sug'), (' Claude Code 기본 목록 ', 'dim'), ('[resume]', 'sug'), (' · Esc · Ctrl+X X로 닫기', 'dim'))
+    s.flow(('[설명]', 'sug'), (' Claude Code 기본 목록 ', 'dim'), ('[resume]', 'sug'))
     return s
 
 
-for name, build, title in [('hero', hero, '~/shop-api — claude'), ('palette', palette, '명령 팔레트 — /palette'), ('sessions', sessions, '세션 패널 — /sessions')]:
-    scr = build()
-    for theme in THEMES:
-        render(scr, theme, title, os.path.join(OUT, f'{name}-{theme}.svg'))
-        print('wrote', f'{name}-{theme}.svg', os.path.getsize(os.path.join(OUT, f'{name}-{theme}.svg')), 'bytes')
+if __name__ == '__main__':
+    OUT.mkdir(parents=True, exist_ok=True)
+    fonts, browser = find_fonts(), find_browser()
+    for name, build, title in [('hero', hero, 'claude — shop-api'), ('palette', palette, '명령 팔레트 — /palette'), ('sessions', sessions, '세션 패널 — /sessions')]:
+        scr = build()
+        for theme in THEMES:
+            html, w, h = html_page(scr, theme, title, fonts)
+            png = OUT / f'{name}-{theme}.png'
+            shoot(browser, html, w, h, png)
+            print('wrote', png.name, f'{w}x{h} css', png.stat().st_size, 'bytes')

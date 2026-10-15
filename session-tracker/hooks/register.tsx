@@ -628,7 +628,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'sessions',
-      description: '세션 패널을 엽니다. 이 PC의 모든 대화를 폴더·날짜별로 보고 이동·고정·보관합니다',
+      description: '세션 패널을 엽니다. 이 PC의 모든 대화를 폴더·날짜별로 조회하고 이동·고정·보관합니다',
       immediate: true,
     })
 
@@ -743,9 +743,11 @@ export const register: Register = on => {
     // 꺼진 대화를 이 터미널에서 열 수 있는지(같은 폴더인지) 볼 때 쓰는 이 세션의 폴더
     const here = self === undefined ? '' : pathKey(self.record.root)
     const now = await $.clock.now()
-    const counts = stateCounts(live)
-    const offCount = items.filter(it => it.kind === 'off').length
-    const archivedCount = items.filter(it => hidden.includes(it.sessionId)).length
+    // 개수는 보관하지 않은 대화만 센다. 상태 필터 버튼의 개수가 그 필터로 보이는 줄 수와 맞도록
+    const visible = items.filter(it => !hidden.includes(it.sessionId))
+    const counts = stateCounts(live.filter(r => !hidden.includes(r.sessionId)))
+    const offCount = visible.filter(it => it.kind === 'off').length
+    const archivedCount = items.length - visible.length
     const layout = arrange(items, { view: v, pins: pinned, archived: hidden, showArchived: inArchive, now })
     const filter = v.filter[v.mode]
 
@@ -757,8 +759,15 @@ export const register: Register = on => {
         </Text>
       </Button>
     )
+    // 고른 보기·필터는 [ ] 대신 같은 폭의 칠한 칸으로 그린다. 폭이 같아 골라도 옆 버튼이 밀리지 않는다(명령 팔레트 탭과 같은 모양)
     const choice = (key: string, word: string, isOn: boolean, onPress: () => void) =>
-      isOn ? <Button key={key} variant="primary" label={word} onPress={onPress} /> : button(key, word, onPress)
+      isOn ? (
+        <Button key={key} plain label={word} onPress={onPress}>
+          <Text backgroundColor="suggestion" color="inverseText" bold>{` ${word} `}</Text>
+        </Button>
+      ) : (
+        button(key, word, onPress)
+      )
     const closeManage = () => update($, managing, () => '')
 
     // 자주 쓰지 않는 고정·보관·끄기·이름 고치기는 [관리]를 눌렀을 때만 그 줄 아래에 연다. 줄마다 버튼을 늘어놓지 않아 열이 맞는다
@@ -927,40 +936,47 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {/* 머리 줄 하나에 개수를 모은다: 켜진 대화는 상태별로, 꺼진 대화(유휴)는 개수만.
-            개수가 길어지면 개수 쪽이 줄바꿈되고 버튼은 첫 줄 오른쪽에 남는다 */}
+        {/* 머리 줄은 명령 팔레트와 같은 모양이다: 왼쪽에 보기 탭(고른 탭은 칠한 버튼), 오른쪽 끝에 [다시 읽기]·[닫기]와 닫는 키.
+            탭 쪽만 줄고 꺾이게 해서, 좁은 화면에서도 버튼은 첫 줄 오른쪽에 남는다. 보기 설정은 이 PC에 저장된다 */}
         <Box key="head" columnGap={1}>
           <Box flexGrow={1} flexShrink={1} columnGap={1} flexWrap="wrap">
-            <Text bold>{`대화 ${items.length}개`}</Text>
-            <Text dimColor>{`· 켜짐 ${items.length - offCount}`}</Text>
-            {counts.map(c => (
-              <Text key={`count-${c.word}`} {...toneProps(c.tone)}>
-                {`${c.word} ${c.n}`}
-              </Text>
-            ))}
-            <Text dimColor>{`· 유휴 ${offCount}`}</Text>
+            {choice('view-folder', '폴더별', v.mode === 'folder' && !inArchive, () => void update($, showArchived, () => false).then(() => setMode($, 'folder')))}
+            {choice('view-date', '날짜별', v.mode === 'date' && !inArchive, () => void update($, showArchived, () => false).then(() => setMode($, 'date')))}
+            {choice('archive-toggle', `보관함 ${archivedCount}`, inArchive, () => void update($, showArchived, () => true))}
           </Box>
           <Box flexShrink={0} columnGap={1}>
             {button('panel-refresh', '다시 읽기', () => void refreshPanel($))}
             <Button key="panel-close" plain role="dismiss" label="[닫기]" onPress={() => void $.ui.close({ id: PANE })}>
               <Text color="suggestion">[닫기]</Text>
             </Button>
+            <Text dimColor>Esc</Text>
           </Box>
         </Box>
-        {/* 보기 설정은 이 PC에 저장된다. 켜짐·유휴 필터는 폴더별·날짜별마다 따로 기억한다 */}
-        <Box key="toolbar" columnGap={1} flexWrap="wrap">
-          <Text dimColor>보기</Text>
-          {choice('view-folder', '폴더별', v.mode === 'folder' && !inArchive, () => void update($, showArchived, () => false).then(() => setMode($, 'folder')))}
-          {choice('view-date', '날짜별', v.mode === 'date' && !inArchive, () => void update($, showArchived, () => false).then(() => setMode($, 'date')))}
-          <Text dimColor>│ 상태</Text>
-          {choice('filter-all', '전체', filter === 'all', () => void setFilter($, v.mode, 'all'))}
-          {choice('filter-on', '켜짐', filter === 'on', () => void setFilter($, v.mode, 'on'))}
-          {choice('filter-off', '유휴', filter === 'off', () => void setFilter($, v.mode, 'off'))}
-          <Text dimColor>│</Text>
-          {choice('archive-toggle', inArchive ? '목록으로' : `보관함 ${archivedCount}`, inArchive, () => void update($, showArchived, old => !old))}
-        </Box>
-        {at === 0 && <Text dimColor>세션 목록을 읽는 중입니다…</Text>}
-        {at > 0 && isEmpty && <Text dimColor>{inArchive ? '보관한 대화가 없습니다' : '보여 줄 대화가 없습니다(상태 필터를 [전체]로 바꿔 보세요)'}</Text>}
+        {/* 둘째 줄: 상태 필터 버튼에 개수를 붙이고, 켜진 대화의 상태별 개수를 이어 쓴다. 필터는 폴더별·날짜별마다 따로 기억한다.
+            보관함에는 필터가 없어 개수만 보인다 */}
+        {inArchive ? (
+          <Text key="toolbar" dimColor>{`보관한 대화 ${archivedCount}개 · [폴더별]이나 [날짜별]을 누르면 목록으로 돌아갑니다`}</Text>
+        ) : (
+          <Box key="toolbar" columnGap={1} flexWrap="wrap">
+            <Text dimColor>상태</Text>
+            {choice('filter-all', `전체 ${visible.length}`, filter === 'all', () => void setFilter($, v.mode, 'all'))}
+            {choice('filter-on', `켜짐 ${visible.length - offCount}`, filter === 'on', () => void setFilter($, v.mode, 'on'))}
+            {choice('filter-off', `유휴 ${offCount}`, filter === 'off', () => void setFilter($, v.mode, 'off'))}
+            {/* 상태별 개수는 한 묶음으로, 필터 버튼과 두 칸 띄운다. 꺾여도 줄 앞에 기호가 남지 않게 구분 기호는 개수 사이에만 둔다 */}
+            {counts.length > 0 && (
+              <Box key="state-counts" flexShrink={0} columnGap={1} marginLeft={1}>
+                {counts.map((c, i) => (
+                  <Box key={`count-${c.word}`} columnGap={1}>
+                    {i > 0 && <Text dimColor>·</Text>}
+                    <Text {...toneProps(c.tone)}>{`${c.word} ${c.n}`}</Text>
+                  </Box>
+                ))}
+              </Box>
+            )}
+          </Box>
+        )}
+        {at === 0 && <Text dimColor>세션 목록을 불러오는 중입니다…</Text>}
+        {at > 0 && isEmpty && <Text dimColor>{inArchive ? '보관한 대화가 없습니다' : '표시할 대화가 없습니다. 상태 필터를 [전체]로 바꿔 보세요'}</Text>}
         {/* 고정한 대화는 보기·상태 필터와 상관없이 맨 위에 한 번만 나온다 */}
         {layout.pinned.length > 0 && (
           <Box key="pinned" flexDirection="column" marginTop={1}>
@@ -989,13 +1005,12 @@ export const register: Register = on => {
           <Button key="panel-resume" plain label="[resume]" onPress={() => void openResume($)}>
             <Text color="suggestion">[resume]</Text>
           </Button>
-          <Text dimColor>· Esc · Ctrl+X X로 닫기</Text>
         </Box>
         {legendOn && (
           <Box key="legend" flexDirection="column">
             <Text dimColor>백그라운드: 탭을 닫아도 켜져 있음 · 포그라운드: 탭을 닫으면 꺼짐 · 유휴: 꺼져 있고 기록만 남음([열기]로 다시 켬)</Text>
             <Text dimColor>밑줄 친 이름을 누르면 바로 고칩니다(켜진 대화만) · [관리]: 고정·보관·끄기([끄기]는 두 번 눌러야 끔)</Text>
-            <Text dimColor>목록은 15초마다 새로 읽습니다 · 고정·보관·보기 설정은 이 PC에만 저장 · [resume] 목록에서 Ctrl+A는 모든 폴더</Text>
+            <Text dimColor>목록은 15초마다 새로 읽습니다 · 고정·보관·보기 설정은 이 PC에만 저장 · [resume] 목록에서 Ctrl+A는 모든 폴더 · 패널은 Esc나 Ctrl+X X로도 닫힘</Text>
             {!hasOrca && (
               <Text dimColor>
                 Orca가 없어 다른 탭으로 옮기지 못합니다: [열기]·[이동]은 이 터미널에서 열거나(/resume) 새 탭용 명령을 복사합니다 · 다른 창의 대화는 그 창에서 쓰고 이름도 그 창에서 /rename

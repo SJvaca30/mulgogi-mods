@@ -33,37 +33,50 @@ export function kTokens(n: number): string {
 export const LIMIT_ALERT = 70
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5시간', seven_day: '주간', spend_limit: '지출' }
 
-/** text는 넓은 band, short는 중간 폭 band, detail은 눌렀을 때 토스트로 보여 주는 글 */
-export type LimitView = { kind: string; text: string; short: string; detail: string; isHigh: boolean; tone: 'normal' | 'warn' | 'bad' }
+/**
+ * 한도 한 줄. 이름·비율·막대는 band와 팔레트가 같은 모양으로 그린다.
+ * reset은 band의 괄호 안 초기화 시각(요일 없음, 모르거나 지났으면 ''), detail은 팔레트에서 그 옆에 쓰는 초기화 시각과 남은 시간이다
+ */
+export type LimitView = { kind: string; name: string; percent: number; reset: string; detail: string; isHigh: boolean; tone: 'normal' | 'warn' | 'bad' }
 
 export function limitView(limit: Limit, now: number): LimitView {
   const name = LIMIT_NAMES[limit.kind] ?? limit.kind
   const resetsAt = limit.resetsAt === undefined ? NaN : Date.parse(limit.resetsAt)
   // 한도 값은 응답이 올 때만 바뀐다. 초기화 시각이 지난 뒤 응답이 없었다면 그동안 쓴 양도 없으므로 0%다
   if (!Number.isNaN(resetsAt) && resetsAt <= now) {
-    return {
-      kind: limit.kind,
-      text: `${name} 0%`,
-      short: `${name} 0%`,
-      detail: `${name} 한도: 초기화됐습니다. 다음 응답부터 새로 집계됩니다`,
-      isHigh: false,
-      tone: 'normal',
-    }
+    return { kind: limit.kind, name, percent: 0, reset: '', detail: '초기화됨 · 다음 응답부터 다시 집계합니다', isHigh: false, tone: 'normal' }
   }
-  const percent = Math.round(limit.percentUsed)
   const isHigh = limit.percentUsed >= LIMIT_ALERT
   const hasReset = !Number.isNaN(resetsAt)
 
   return {
     kind: limit.kind,
-    // band에는 초기화 시각만 둔다. 남은 시간과 "초기화" 낱말은 팔레트 맨 위 detail에서 본다
-    text: `${name} ${percent}%${hasReset ? ` (${resetWhen(resetsAt, now)})` : ''}`,
-    short: `${name} ${percent}%${hasReset ? ` (${resetWhen(resetsAt, now, false)})` : ''}`,
-    // 팔레트 맨 위 한 줄(약 88칸)에 둘을 나란히 놓으므로 짧게 쓴다. "사용" 낱말과 요일은 band와 같이 뺀다
-    detail: `${name} ${percent}%${hasReset ? ` · ${resetWhen(resetsAt, now, false)} 초기화(${untilText(resetsAt - now)} 뒤)` : ''}`,
+    name,
+    percent: Math.round(limit.percentUsed),
+    // band는 한 줄에 컨텍스트·한도를 모두 두므로 요일을 뺀다. 팔레트는 한도마다 한 줄이라 요일과 남은 시간을 함께 쓴다
+    reset: hasReset ? resetWhen(resetsAt, now, false) : '',
+    detail: hasReset ? `${resetWhen(resetsAt, now)} 초기화 · ${untilText(resetsAt - now)} 뒤` : '',
     isHigh,
     tone: limit.percentUsed >= 90 ? 'bad' : isHigh ? 'warn' : 'normal',
   }
+}
+
+/** band 상태 줄의 항목 하나: [!] 이름 막대 비율 (설명). 막대·설명이 없으면 '' */
+export type MeterItem = { key: string; name: string; bar: string; figure: string; note: string; tone: 'normal' | 'warn' | 'bad' }
+
+/** 터미널 칸 수. 한글·한자 같은 넓은 글자는 두 칸, 막대(█░)를 포함한 나머지는 한 칸으로 센다 */
+export function cells(text: string): number {
+  let n = 0
+  for (const ch of text) n += /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(ch) ? 2 : 1
+
+  return n
+}
+
+/** 항목이 차지하는 칸 수. 조각 사이는 한 칸씩 띄운다(band가 columnGap 1로 그린다) */
+export function itemCells(item: MeterItem): number {
+  const parts = [item.tone === 'bad' ? '!' : '', item.name, item.bar, item.figure, item.note].filter(p => p !== '')
+
+  return parts.reduce((n, p) => n + cells(p), 0) + parts.length - 1
 }
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']

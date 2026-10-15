@@ -30,7 +30,7 @@ export type PromptEntry = { uuid: string; at: number; text: string }
  */
 export type Assumption = { id: string; text: string; at: number; status: 'open' | 'right' | 'wrong' | 'sent'; fix: string; agent: string }
 
-/** 아이디어 보관함의 한 줄. at은 보관한 시각($.clock.now()의 밀리초) */
+/** 아이디어 목록의 한 줄. at은 보관한 시각($.clock.now()의 밀리초) */
 export type Idea = { text: string; at: number }
 
 /**
@@ -50,9 +50,9 @@ declare module 'claude-code' {
       paletteTab: PaletteTab
       /** 최근 답변 글, 최신이 먼저. 답변 탭을 열 때 다시 읽는다 */
       replies: string[]
-      /** 이 프로젝트의 아이디어 보관함, 최신이 먼저. $.store에 프로젝트 경로별로 저장한다 */
+      /** 이 프로젝트의 아이디어 목록, 최신이 먼저. $.store에 프로젝트 경로별로 저장한다 */
       ideas: Idea[]
-      /** 보관함 탭의 새 아이디어 입력칸 */
+      /** 아이디어 탭의 새 아이디어 입력칸 */
       ideaDraft: string
       /** 이 세션에서 기록된 가정, 최신이 먼저 */
       assumptions: Assumption[]

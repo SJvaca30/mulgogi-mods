@@ -347,11 +347,13 @@ test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터
   const ui = await openPanel($)
   expect(await ui.find({ key: 'agent-open-83b9eb02-1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Orca의 미사용 세션' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '유휴' })).toBeDefined()
-  // 종류 글자는 입력창 위 배지와 같은 색이다: 백그라운드 파랑, 포그라운드 노랑, 유휴는 흐리게
-  expect((await ui.find({ type: 'Text', text: '백그라운드' }))?.props.color).toBe('suggestion')
-  expect((await ui.find({ type: 'Text', text: '포그라운드' }))?.props.color).toBe('warning')
-  expect((await ui.find({ type: 'Text', text: '유휴' }))?.props.dimColor).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^유휴$/ })).toBeDefined()
+  // 종류 글자는 입력창 위 배지와 같은 색이다: 백그라운드 파랑, 포그라운드 노랑, 유휴는 흐리게. text는 부분 일치라 ^$로 낱말 하나만 고른다
+  expect((await ui.find({ type: 'Text', text: /^백그라운드$/ }))?.props.color).toBe('suggestion')
+  expect((await ui.find({ type: 'Text', text: /^포그라운드$/ }))?.props.color).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: /^유휴$/ }))?.props.dimColor).toBe(true)
+  // 상태 필터 버튼에는 보관하지 않은 대화의 개수가 붙는다
+  expect(await ui.find({ type: 'Text', text: /^\[유휴 \d+\]$/ })).toBeDefined()
   expect(await ui.find({ key: 'agent-open-spare-1' })).toBeUndefined()
   expect(await ui.find({ key: 'agent-open-scratch-1' })).toBeUndefined()
   // 켜진 대화의 이동: Orca 탭이 있으면 전환, 탭 없는 백그라운드 세션은 새 탭에서 붙인다
@@ -394,7 +396,11 @@ test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터
   await ui.press({ key: 'archive-toggle' })
   await ui.press({ key: 'agent-restore-30a5238d-1' })
   expect(host.store.get('archived')).toEqual([])
+  // 보관함은 탭이라 다시 눌러도 그대로이고, [폴더별]을 누르면 목록으로 돌아간다
   await ui.press({ key: 'archive-toggle' })
+  expect(await ui.find({ key: 'filter-all' })).toBeUndefined()
+  await ui.press({ key: 'view-folder' })
+  expect(await ui.find({ key: 'filter-all' })).toBeDefined()
   // 열기: 기록만 남은 대화는 --resume, 멈춘 백그라운드 세션은 attach
   await ui.press({ key: 'agent-open-83b9eb02-1' })
   expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', 'Orca의 미사용 세션', '--command', 'claude --resume 83b9eb02-1', '--focus', '--json'])

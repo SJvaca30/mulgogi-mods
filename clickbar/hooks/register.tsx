@@ -7,7 +7,8 @@ import { DEFAULT_FAVORITES, GROUPS, KO, NEEDS_ARGS, TIPS, keyGroupsFor, platform
 import type { Platform } from './catalog'
 import type { Assumption, Idea, PaletteTab, PromptEntry } from '../types'
 import { ASSUME_DESCRIPTION, ASSUME_SCHEMA, ASSUME_SWITCH_KEY, ASSUME_TOOL_MATCH, ASSUME_TOOL_NAME, assumptionTexts, correctionPrompt } from './assumptions'
-import { bar, kTokens, limitView, usdText, viewOf } from './meter'
+import { bar, itemCells, kTokens, limitView, usdText, viewOf } from './meter'
+import type { MeterItem } from './meter'
 import { blocksText, isTypedPrompt, mergePrompts, promptsFromTranscript } from './prompts'
 import { finalReplies, previewLine, unfence } from './replies'
 import { parseSyncStatus, syncView } from './sync'
@@ -25,6 +26,10 @@ const COL_KEY = 16
 // band 맨 위 가로줄의 머리 글. 채팅과 band 사이 경계이고, 엔진의 [-]가 이 줄 끝에 붙는다
 const BAND_RULE_LABEL = '── clickbar '
 const NARROW_COLUMNS = 72
+// band 상태 줄: 항목 사이 빈칸 수, 한도 막대 칸 수(컨텍스트 막대는 10칸). 팔레트 한도 줄의 이름 열 폭("! 5시간"까지)
+const METER_GAP = 3
+const LIMIT_BAR_CELLS = 5
+const COL_LIMIT_NAME = 7
 // 클릭할 때 터미널이 선택 영역을 클립보드에 넣을 수 있어, 잠시 뒤 한 번 더 복사한다 (reply-tools와 같은 방식)
 const SELECTION_SETTLE_MS = 350
 // btw는 모델이 대화 전체를 보므로, 선택한 글은 어느 부분인지 가리킬 만큼만 붙인다
@@ -135,7 +140,7 @@ async function copyText($: EngineInterface, reply: string, surface: RenderSurfac
   await $.ui.copy({ text, surface })
   await $.clock.sleep(SELECTION_SETTLE_MS)
   const result = await $.ui.copy({ text, surface })
-  $.ui.toast(result.isCopied ? `${what}을 복사했습니다 (${text.split('\n').length}줄)` : `복사 실패: ${result.reason}`)
+  $.ui.toast(result.isCopied ? `${what}을 복사했습니다 (${text.split('\n').length}줄)` : `복사하지 못했습니다: ${result.reason}`)
 }
 
 async function copyLastReply($: EngineInterface, surface: RenderSurface) {
@@ -147,7 +152,7 @@ async function copyLastReply($: EngineInterface, surface: RenderSurface) {
   await copyText($, last, surface, '마지막 답변')
 }
 
-// 아이디어 보관함은 프로젝트(세션의 루트 폴더)마다 따로 두고, 세션이 바뀌어도 남도록 $.store에 둔다
+// 아이디어 목록은 프로젝트(세션의 루트 폴더)마다 따로 두고, 세션이 바뀌어도 남도록 $.store에 둔다
 async function ideaKey($: EngineInterface) {
   return `ideas:${await $.session.root()}`
 }
@@ -168,23 +173,23 @@ async function saveIdeas($: EngineInterface, list: Idea[]) {
 
 // 입력창 아래 상태 줄: 보관한 아이디어 개수. 없으면 지운다
 async function refreshStatus($: EngineInterface) {
-  // 짐작 개수는 band의 버튼이 이미 보여 주므로 상태 줄에는 보관함만 둔다
+  // 가정 개수는 band의 버튼이 이미 보여 주므로 상태 줄에는 아이디어만 둔다
   const idea = (await read($, ideas)).length
-  $.ui.status(idea === 0 ? undefined : `보관한 아이디어 ${idea}개 (⋯ 더보기 → 보관함)`)
+  $.ui.status(idea === 0 ? undefined : `보관한 아이디어 ${idea}개 · /idea로 확인`)
 }
 
 // 사용자 턴으로 보낸다. 들어가지 못했으면 false. Claude가 일하는 중이면 지금 턴이 끝난 뒤 실행된다
 async function submitAsUser($: EngineInterface, text: string) {
   const result = await $.prompt.submit({ text, asUser: true })
   if ('drop' in result && result.drop !== undefined) {
-    $.ui.toast('보내지 못했습니다. 다른 mod나 훅이 막았습니다')
+    $.ui.toast('전송하지 못했습니다. 다른 mod나 훅이 전송을 차단했습니다')
     return false
   }
-  $.ui.toast('보냈습니다. Claude가 일하는 중이면 지금 작업이 끝난 뒤 실행됩니다')
+  $.ui.toast('전송했습니다. Claude가 작업 중이면 현재 작업이 끝난 뒤 실행됩니다')
   return true
 }
 
-// 보낸 뒤에만 보관함에서 지운다
+// 보낸 뒤에만 아이디어 목록에서 지운다
 async function sendIdea($: EngineInterface, idea: Idea) {
   if (await submitAsUser($, idea.text)) await removeIdea($, idea)
 }
@@ -206,14 +211,14 @@ async function markAllRight($: EngineInterface) {
   const open = (await read($, assumptions)).filter(a => a.status === 'open').length
   await update($, assumptions, old => old.map(a => (a.status === 'open' ? { ...a, status: 'right' as const } : a)))
   await refreshStatus($)
-  $.ui.toast(open === 0 ? '확인할 짐작이 남아 있지 않습니다' : `남은 짐작 ${open}개를 맞음으로 표시했습니다`)
+  $.ui.toast(open === 0 ? '확인할 가정이 남아 있지 않습니다' : `남은 가정 ${open}개를 맞음으로 표시했습니다`)
 }
 
 async function clearAssumptions($: EngineInterface) {
   const n = (await read($, assumptions)).length
   await update($, assumptions, () => [])
   await refreshStatus($)
-  $.ui.toast(n === 0 ? '비울 짐작이 없습니다' : `짐작 ${n}개를 목록에서 지웠습니다`)
+  $.ui.toast(n === 0 ? '비울 가정이 없습니다' : `가정 ${n}개를 목록에서 삭제했습니다`)
 }
 
 async function addPrompts($: EngineInterface, list: PromptEntry[]) {
@@ -232,7 +237,7 @@ async function backfillPrompts($: EngineInterface, transcriptPath: string) {
 }
 
 async function jumpTo($: EngineInterface, entry: PromptEntry) {
-  const failed = '그 질문 위치로 갈 수 없습니다. 압축 이전 대화이거나 화면에 그려지지 않은 질문입니다'
+  const failed = '해당 질문 위치로 이동할 수 없습니다. 압축 이전 대화이거나 화면에 표시되지 않은 질문입니다'
   try {
     const result = await $.ui.scroll({ to: { requestId: entry.uuid }, block: 'start' })
     if (result.deny !== undefined) $.ui.toast(failed)
@@ -247,14 +252,14 @@ async function suggestCommand($: EngineInterface, text: string) {
   const tip = TIPS.find(t => !tipped.has(t.command) && (installed.size === 0 || installed.has(t.command)) && t.pattern.test(text))
   if (tip === undefined) return
   tipped.add(tip.command)
-  $.ui.toast(`팁: /${tip.command} 명령으로 바로 할 수 있습니다. ${KO.get(tip.command) ?? ''} (끄려면 /tips off)`, { timeoutMs: 10000 })
+  $.ui.toast(`팁: /${tip.command} 명령으로 바로 실행할 수 있습니다. ${KO.get(tip.command) ?? ''} (끄려면 /tips off)`, { timeoutMs: 10000 })
 }
 
 async function sendCorrections($: EngineInterface) {
   const list = await read($, assumptions)
   const text = correctionPrompt(list)
   if (text === null) {
-    $.ui.toast('틀렸다고 고른 짐작이 없습니다')
+    $.ui.toast('틀림으로 표시한 가정이 없습니다')
     return
   }
   if (await submitAsUser($, text)) {
@@ -266,13 +271,13 @@ async function sendCorrections($: EngineInterface) {
 async function addIdea($: EngineInterface, text: string) {
   const trimmed = text.trim()
   if (trimmed === '') {
-    $.ui.toast('보관할 글이 없습니다. /idea 뒤에 내용을 쓰거나, 입력창에 쓴 뒤 "지금 입력 보관"을 누르세요')
+    $.ui.toast('보관할 내용이 없습니다. /idea 뒤에 내용을 입력하거나, 입력창에 작성한 뒤 [+ 입력 내용 보관]을 누르세요')
     return false
   }
   await loadIdeas($)
   const list = [{ text: trimmed, at: await $.clock.now() }, ...(await read($, ideas))].slice(0, IDEAS_MAX)
   await saveIdeas($, list)
-  $.ui.toast(`아이디어를 보관했습니다 (이 프로젝트 ${list.length}개). ⋯ → 보관함에서 다시 꺼냅니다`)
+  $.ui.toast(`아이디어를 보관했습니다 (이 프로젝트 ${list.length}개). /idea로 다시 확인할 수 있습니다`)
   return true
 }
 
@@ -281,7 +286,7 @@ async function shelveDraft($: EngineInterface) {
   const draft = (await $.prompt.read()).text
   if (!(await addIdea($, draft))) return
   const cleared = await $.prompt.fill({ text: '', mode: 'replace' })
-  if (!cleared.isFilled) $.ui.toast('보관은 했지만 입력창을 비우지 못했습니다')
+  if (!cleared.isFilled) $.ui.toast('보관했지만 입력창을 비우지 못했습니다')
 }
 
 async function removeIdea($: EngineInterface, idea: Idea) {
@@ -354,13 +359,13 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'palette',
-      description: '명령 팔레트를 엽니다. 명령·스킬·단축키·대화 기록을 한국어 설명과 함께 찾고 바로 실행합니다',
+      description: '명령 팔레트를 엽니다. 명령·스킬·단축키·대화 기록을 한국어 설명과 함께 검색하고 바로 실행합니다',
       immediate: true,
     })
     // Claude가 일하는 중에도 끊지 않고 보관할 수 있도록 immediate로 둔다
     await $.command.register({
       name: 'idea',
-      description: '아이디어를 프로젝트별 보관함에 저장합니다. 내용 없이 실행하면 보관함을 엽니다',
+      description: '아이디어를 프로젝트별로 저장합니다. 내용 없이 실행하면 저장한 아이디어 목록을 엽니다',
       argumentHint: '[보관할 내용]',
       immediate: true,
     })
@@ -410,7 +415,7 @@ export const register: Register = on => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off' || arg === 'on') {
       await $.store.set(ASSUME_SWITCH_KEY, arg)
-      $.ui.toast(arg === 'off' ? '짐작 기록을 껐습니다. 지금부터 기록하지 않고, 다음 세션부터는 도구도 모델에게 보이지 않습니다' : '짐작 기록을 켰습니다. 다음 세션부터 적용됩니다')
+      $.ui.toast(arg === 'off' ? '가정 기록을 껐습니다. 지금부터 기록하지 않으며, 다음 세션부터는 모델에 도구도 제공하지 않습니다' : '가정 기록을 켰습니다. 다음 세션부터 적용됩니다')
     } else {
       await update($, paletteTab, () => 'assume')
       await openPalette($)
@@ -569,17 +574,52 @@ export const register: Register = on => {
     const isWide = e.props.bodyColumns >= WIDE_COLUMNS
     const isNarrow = e.props.bodyColumns < NARROW_COLUMNS
     const toneColor = (t: 'normal' | 'warn' | 'bad' | undefined) => (t === 'bad' ? 'error' : t === 'warn' ? 'warning' : undefined)
-    const tone = toneColor(view?.tone)
-    const label =
+    // 상태 줄 항목: 이름(기본색) · 막대 · 비율(굵게) · (설명, 흐리게). 넓을 때만 막대를 그린다
+    const contextItem: MeterItem | null =
       view === null
-        ? '컨텍스트 —'
-        : isNarrow
-          ? `컨텍스트 ${view.percent}%`
-          : isWide
-            ? `컨텍스트 ${bar(view.percent)} ${view.percent}% (${view.basis === 'compact' ? '자동 압축까지' : '창 여유'} ${kTokens(view.left)})`
-            : `컨텍스트 ${view.percent}% (${view.basis === 'compact' ? '압축까지' : '창 여유'} ${kTokens(view.left)})`
+        ? null
+        : {
+            key: 'band-meter-context',
+            name: '컨텍스트',
+            bar: isWide ? bar(view.percent) : '',
+            figure: `${view.percent}%`,
+            note: isNarrow ? '' : `(${view.basis === 'compact' ? (isWide ? '자동 압축까지' : '압축까지') : '창 여유'} ${kTokens(view.left)})`,
+            tone: view.tone,
+          }
     // 넓거나 중간 폭이면 비율과 초기화 시각이 늘 보이고, 좁으면 70% 이상만 보인다
-    const limits = stats.limits.map(l => limitView(l, now)).filter(l => !isNarrow || l.isHigh)
+    const limitItems: MeterItem[] = stats.limits
+      .map(l => limitView(l, now))
+      .filter(l => !isNarrow || l.isHigh)
+      .map(l => ({ key: `band-limit-${l.kind}`, name: l.name, bar: isWide ? bar(l.percent, LIMIT_BAR_CELLS) : '', figure: `${l.percent}%`, note: l.reset === '' ? '' : `(${l.reset})`, tone: l.tone }))
+    const meterItems = [...(contextItem === null ? [] : [contextItem]), ...limitItems]
+    // API 환산액은 넓은 band에서, 나머지 항목과 한 줄에 들어갈 때만 붙인다(넘치면 줄이 두 줄로 바뀌며 흔들린다)
+    const costItem: MeterItem | null =
+      !isWide || stats.costUsd === null ? null : { key: 'band-meter-cost', name: 'API 환산', bar: '', figure: usdText(stats.costUsd), note: '', tone: 'normal' }
+    const usedCells = meterItems.reduce((n, it, i) => n + itemCells(it) + (i > 0 ? METER_GAP : 0), 0)
+    if (costItem !== null && usedCells + METER_GAP + itemCells(costItem) <= e.props.bodyColumns) meterItems.push(costItem)
+    const meterView = (it: MeterItem) => {
+      const color = toneColor(it.tone)
+
+      return (
+        <Box key={it.key} flexShrink={0} columnGap={1}>
+          {it.tone === 'bad' && (
+            <Text color={color} bold>
+              !
+            </Text>
+          )}
+          <Text>{it.name}</Text>
+          {it.bar !== '' && (
+            <Text color={color} dimColor={color === undefined}>
+              {it.bar}
+            </Text>
+          )}
+          <Text color={color} bold>
+            {it.figure}
+          </Text>
+          {it.note !== '' && <Text dimColor>{it.note}</Text>}
+        </Box>
+      )
+    }
     const openAssumptions = (await read($, assumptions)).filter(a => a.status === 'open').length
     // session-tracker가 설치돼 있으면 세션 패널 버튼을 둔다
     const hasSessions = (await read($, commands)).some(c => c.name === 'sessions')
@@ -604,17 +644,15 @@ export const register: Register = on => {
             {rule}
           </Text>
         )}
-        <Box key="status" gap={1} flexWrap="wrap">
-          <Text color={tone} dimColor={tone === undefined}>
-            {label}
-          </Text>
-          {limits.length > 0 && <Text dimColor>│ 사용량</Text>}
-          {limits.map(l => (
-            <Text key={`band-limit-${l.kind}`} color={toneColor(l.tone)} dimColor={l.tone === 'normal'}>
-              {`${l.tone === 'bad' ? '! ' : ''}${isWide ? l.text : l.short}`}
-            </Text>
-          ))}
-          {isWide && stats.costUsd !== null && <Text dimColor>│ API 환산 {usdText(stats.costUsd)}</Text>}
+        {/* 항목은 줄지 않는 묶음이라, 폭이 모자라면 항목째 다음 줄로 넘어간다. 구분 기호 대신 빈칸으로 띄워 줄 앞에 기호가 남지 않는다 */}
+        <Box key="status" columnGap={METER_GAP} flexWrap="wrap">
+          {contextItem === null && (
+            <Box key="band-meter-context" columnGap={1}>
+              <Text>컨텍스트</Text>
+              <Text dimColor>—</Text>
+            </Box>
+          )}
+          {meterItems.map(meterView)}
         </Box>
         {/* 버튼 이름은 모두 영어다. 명령이 있는 버튼은 그 명령 이름 그대로다(palette=/palette, assumptions=/assumptions).
             용도별로 │로 묶는다: 컨텍스트 │ 대화 찾기·나누기 │ 답변 다루기 │ 도구. 나타났다 사라지는 assumptions는 맨 끝에 둬서 다른 버튼이 밀리지 않게 한다 */}
@@ -699,20 +737,25 @@ export const register: Register = on => {
       )
 
     const tab = await read($, paletteTab)
+    // 머리 줄은 세션 패널과 같은 모양이다: 왼쪽에 탭(고른 탭은 칠한 버튼), 오른쪽 끝에 [닫기]와 닫는 키.
+    // 탭 쪽만 줄고 꺾이게 해서, 좁은 화면에서도 [닫기]는 첫 줄 오른쪽에 남는다
     const tabsRow = (
-      <Box key="tabs" gap={1}>
+      <Box key="tabs" flexGrow={1} flexShrink={1} columnGap={1} flexWrap="wrap">
         {(
           [
             ['commands', '명령'],
             ['keys', '단축키'],
             ['prompts', '내 질문'],
             ['replies', '답변'],
-            ['ideas', '보관함'],
-            ['assume', '짐작'],
+            ['ideas', '아이디어'],
+            ['assume', '가정'],
           ] as const
         ).map(([id, title]) =>
           id === tab ? (
-            <Button key={`tab-${id}`} variant="primary" label={title} onPress={() => void showTab($, id)} />
+            // 고른 탭은 [ ] 대신 같은 폭의 칠한 칸으로 그린다. 폭이 같아 탭을 바꿔도 옆 탭이 밀리지 않는다(세션 패널과 같은 모양)
+            <Button key={`tab-${id}`} plain label={title} onPress={() => void showTab($, id)}>
+              <Text backgroundColor="suggestion" color="inverseText" bold>{` ${title} `}</Text>
+            </Button>
           ) : (
             <Button key={`tab-${id}`} plain label={`[${title}]`} onPress={() => void showTab($, id)}>
               <Text color="suggestion">[{title}]</Text>
@@ -721,28 +764,46 @@ export const register: Register = on => {
         )}
       </Box>
     )
-    // band에는 짧게만 보이는 사용량 한도를 여기서 자세히 보여 준다(남은 비율, 초기화 시각과 남은 시간)
+    // band에는 짧게만 보이는 사용량 한도를 여기서 자세히 보여 준다(초기화 시각의 요일과 남은 시간)
     const now = await $.clock.now()
     const limitDetails = (await read($, usage)).limits.map(l => limitView(l, now))
     const tabs = (
       <Box key="tabs-area" flexDirection="column">
-        <Box key="pane-head" gap={1}>
+        <Box key="pane-head" columnGap={1}>
           {tabsRow}
-          <Button key="pane-close" plain role="dismiss" label="[닫기]" onPress={() => void $.ui.close({ id: PANE })}>
-            <Text color="suggestion">[닫기]</Text>
-          </Button>
-          <Text dimColor>Esc · Ctrl+X X</Text>
-        </Box>
-        {/* 한도는 한 줄에 모은다. 구분 기호 없이 빈칸으로 띄워, 좁아서 꺾여도 줄 앞에 기호가 남지 않는다 */}
-        {limitDetails.length > 0 && (
-          <Box key="limit-details" columnGap={3} flexWrap="wrap">
-            {limitDetails.map(l => (
-              <Text key={`limit-detail-${l.kind}`} color={l.tone === 'bad' ? 'error' : l.tone === 'warn' ? 'warning' : undefined} dimColor={l.tone === 'normal'}>
-                {l.detail}
-              </Text>
-            ))}
+          <Box flexShrink={0} columnGap={1}>
+            <Button key="pane-close" plain role="dismiss" label="[닫기]" onPress={() => void $.ui.close({ id: PANE })}>
+              <Text color="suggestion">[닫기]</Text>
+            </Button>
+            <Text dimColor>Esc</Text>
           </Box>
-        )}
+        </Box>
+        {/* 한도는 한 줄에 하나씩, band와 같은 모양(이름·막대·비율)으로 열을 맞추고 초기화 시각과 남은 시간을 붙인다 */}
+        {limitDetails.map(l => {
+          const color = l.tone === 'bad' ? 'error' : l.tone === 'warn' ? 'warning' : undefined
+
+          return (
+            <Box key={`limit-detail-${l.kind}`} columnGap={1}>
+              <Box width={COL_LIMIT_NAME} flexShrink={0} columnGap={1}>
+                {l.tone === 'bad' && (
+                  <Text color={color} bold>
+                    !
+                  </Text>
+                )}
+                <Text>{l.name}</Text>
+              </Box>
+              <Text color={color} dimColor={color === undefined}>
+                {bar(l.percent, LIMIT_BAR_CELLS)}
+              </Text>
+              <Box width={4} flexShrink={0} justifyContent="flex-end">
+                <Text color={color} bold>
+                  {`${l.percent}%`}
+                </Text>
+              </Box>
+              {l.detail !== '' && <Text dimColor>{l.detail}</Text>}
+            </Box>
+          )
+        })}
       </Box>
     )
 
@@ -756,12 +817,12 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Text dimColor>키는 직접 누른다 · 같은 일을 하는 명령이 있으면 줄 끝 [/명령]으로 바로 실행한다</Text>
-          {platform === 'mac' && <Text dimColor>Mac: Ctrl은 ⌘Command가 아니라 ⌃Control 키, Option은 ⌥ 키다</Text>}
+          <Text dimColor>단축키는 직접 눌러야 합니다 · 같은 기능의 명령이 있으면 줄 끝 [/명령]으로 바로 실행할 수 있습니다</Text>
+          {platform === 'mac' && <Text dimColor>Mac: Ctrl은 ⌘Command가 아닌 ⌃Control 키이며, Option은 ⌥ 키입니다</Text>}
           {Input !== undefined && (
-            <Input key="search" placeholder="키나 설명으로 검색" value={raw} autoFocus onInput={(v: string) => void update($, query, () => v)} onSubmit={(v: string) => void update($, query, () => v)} />
+            <Input key="search" placeholder="키 또는 설명으로 검색" value={raw} autoFocus onInput={(v: string) => void update($, query, () => v)} onSubmit={(v: string) => void update($, query, () => v)} />
           )}
-          {keyGroups.length === 0 && <Text dimColor>찾는 단축키가 없습니다</Text>}
+          {keyGroups.length === 0 && <Text dimColor>일치하는 단축키가 없습니다</Text>}
           {keyGroups.map(group => (
             <Box key={`keys-${group.title}`} flexDirection="column">
               <Text bold>{group.title}</Text>
@@ -791,8 +852,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Text dimColor>내가 보낸 질문, 최신이 위. [이동]은 대화에서 그 질문 위치로 스크롤하고, [입력창에]는 입력창에 다시 넣는다</Text>
-          {list.length === 0 && <Text dimColor>아직 기록된 질문이 없습니다. 이 기능을 켠 뒤에 보낸 질문부터 쌓입니다</Text>}
+          <Text dimColor>보낸 질문을 최신순으로 표시합니다. [이동]은 대화에서 해당 질문 위치로 이동하고, [입력창에]는 질문을 입력창에 다시 넣습니다</Text>
+          {list.length === 0 && <Text dimColor>아직 기록된 질문이 없습니다. 이 기능을 켠 뒤 보낸 질문부터 기록합니다</Text>}
           {list.map((p, i) => (
             <Box key={`prompt-${p.uuid}`} gap={1}>
               {act(`prompt-jump-${i}`, '이동', () => void jumpTo($, p))}
@@ -813,13 +874,13 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Text dimColor>Claude가 묻지 않고 짐작해서 정한 것들이다. 틀린 것만 "틀림"을 누르고 고칠 내용을 쓴 뒤 보내면 그 부분만 고친다</Text>
-          <Box key="assume-head" gap={1}>
-            {act('assume-send', `틀린 짐작 고쳐 달라고 보내기 (${wrong})`, () => void sendCorrections($), wrong > 0 ? 'warning' : 'suggestion')}
-            {act('assume-all-right', '남은 것 모두 맞음', () => void markAllRight($))}
+          <Text dimColor>Claude가 확인 없이 정한 가정입니다. 틀린 항목에 [틀림]을 누르고 수정 내용을 적어 보내면 해당 부분만 수정합니다</Text>
+          <Box key="assume-head" columnGap={1} flexWrap="wrap">
+            {act('assume-send', `틀린 가정 수정 요청 (${wrong})`, () => void sendCorrections($), wrong > 0 ? 'warning' : 'suggestion')}
+            {act('assume-all-right', '나머지 모두 맞음', () => void markAllRight($))}
             {act('assume-clear', '목록 비우기', () => void clearAssumptions($))}
           </Box>
-          {list.length === 0 && <Text dimColor>아직 기록된 짐작이 없습니다. 끄려면 /assumptions off</Text>}
+          {list.length === 0 && <Text dimColor>아직 기록된 가정이 없습니다. 기능을 끄려면 /assumptions off를 입력합니다</Text>}
           {list.map(a => (
             <Box key={`assume-${a.id}`} flexDirection="column">
               <Box gap={1}>
@@ -831,7 +892,7 @@ export const register: Register = on => {
               {a.status === 'wrong' && Input !== undefined && (
                 <Input
                   key={`assume-fix-${a.id}`}
-                  placeholder="대신 어떻게? (비우면 다시 판단해 달라고 보낸다)"
+                  placeholder="올바른 내용 (비워 두면 다시 판단하도록 요청합니다)"
                   value={a.fix}
                   onInput={(v: string) => void update($, assumptions, old => old.map(x => (x.id === a.id ? { ...x, fix: v } : x)))}
                   onSubmit={(v: string) => void update($, assumptions, old => old.map(x => (x.id === a.id ? { ...x, fix: v } : x)))}
@@ -851,14 +912,15 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Box key="ideas-head" gap={1}>
-            {act('idea-shelve', '+ 지금 입력 보관', () => void shelveDraft($))}
-            <Text dimColor>이 프로젝트 전용 · [보내기]는 바로 보내고 [입력창에]는 넣기만 한다 · /idea 내용 으로도 보관</Text>
+          {/* 탭마다 안내 한 줄을 먼저 두고, 탭 전용 버튼은 그 아래 줄에 모은다(가정·답변 탭과 같은 순서) */}
+          <Text dimColor>이 프로젝트 전용입니다 · [보내기]는 바로 전송하고 [입력창에]는 입력창에 넣기만 합니다 · /idea 내용으로도 보관할 수 있습니다</Text>
+          <Box key="ideas-head" columnGap={1}>
+            {act('idea-shelve', '+ 입력 내용 보관', () => void shelveDraft($))}
           </Box>
           {Input !== undefined && (
             <Input
               key="idea-new"
-              placeholder="새 아이디어를 쓰고 Enter로 보관"
+              placeholder="새 아이디어를 입력하고 Enter로 보관"
               value={draftIdea}
               onInput={(v: string) => void update($, ideaDraft, () => v)}
               onSubmit={(v: string) => void addIdea($, v).then(ok => (ok ? update($, ideaDraft, () => '') : undefined))}
@@ -884,8 +946,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           {tabs}
-          <Box key="replies-head" gap={1}>
-            <Text dimColor>최근 답변 {list.length}개, 최신이 위</Text>
+          <Text dimColor>최근 답변 {list.length}개를 최신순으로 표시합니다. [copy]는 답변을 클립보드에 복사합니다</Text>
+          <Box key="replies-head" columnGap={1}>
             {act('replies-refresh', '다시 읽기', () => void showTab($, 'replies'))}
           </Box>
           {list.length === 0 && <Text dimColor>아직 답변이 없습니다</Text>}
@@ -906,15 +968,15 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {tabs}
-        <Text dimColor>[/명령] 실행 · [넣기] 입력창에 넣기(인자를 붙일 때) · [고정] 맨 위로 · [해제] 고정 풀기</Text>
+        <Text dimColor>[/명령] 실행 · [넣기] 입력창에 넣기(인자 입력용) · [고정] 맨 위에 고정 · [해제] 고정 해제</Text>
         {Input !== undefined && (
           <Input key="search" placeholder="명령 이름이나 설명으로 검색" value={raw} autoFocus onInput={(v: string) => void update($, query, () => v)} onSubmit={(v: string) => void update($, query, () => v)} />
         )}
-        {installed.length === 0 && <Text dimColor>명령 목록을 읽는 중입니다…</Text>}
+        {installed.length === 0 && <Text dimColor>명령 목록을 불러오는 중입니다…</Text>}
         {section('fav', '고정한 명령', favs.filter(n => byName.has(n) && matches(n)))}
         {GROUPS.map((group, i) => section(`g${i}`, group.title, group.entries.map(x => x.name).filter(n => byName.has(n) && matches(n) && unpinned(n))))}
         {/* 한국어 설명을 아직 달지 않은 명령도 숨기지 않는다. 설명은 엔진이 주는 원문 그대로다 */}
-        {section('etc', `그 밖의 명령 ${others.filter(unpinned).length}개 (플러그인·스킬 포함, 설명은 원문)`, others.filter(unpinned))}
+        {section('etc', `그 밖의 명령 ${others.filter(unpinned).length}개 (플러그인·스킬 포함, 원문 설명)`, others.filter(unpinned))}
       </Box>
     )
   })
