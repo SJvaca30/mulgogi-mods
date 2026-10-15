@@ -163,10 +163,6 @@ claude plugin uninstall clickbar@mulgogi-mods     # 삭제
 
 GitHub SSH 키가 없는 PC에서 Claude Code 안의 설치·업데이트가 실패하면, 환경 변수 `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`을 설정한 뒤 다시 시도합니다.
 
-## 화면 예시 그림
-
-`docs/make_images.py`가 터미널 화면을 HTML로 다시 그려 헤드리스 Edge(또는 Chrome)로 PNG를 만듭니다. 글꼴은 [D2Coding](https://github.com/naver/d2codingfont)(OFL 1.1)을 씁니다. 팔레트 설명은 `clickbar/hooks/catalog.ts`에서 읽으므로, 설명을 바꾼 뒤 다시 실행하면 그림에도 반영됩니다.
-
 ## 라이선스
 
 [MIT](LICENSE)
