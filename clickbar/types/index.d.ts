@@ -33,6 +33,9 @@ export type Assumption = { id: string; text: string; at: number; status: 'open' 
 /** 아이디어 목록의 한 줄. at은 보관한 시각($.clock.now()의 밀리초) */
 export type Idea = { text: string; at: number }
 
+/** 진행 중인 턴에서 지금까지 고친 파일 수와 메인 에이전트의 도구 호출 수. 일하는 동안 스피너 줄 끝에 붙인다 */
+export type TurnProgress = { files: number; tools: number }
+
 /**
  * CCsetting sync.ps1이 ~/.claude/sync.status.json에 남기는 마지막 전체 동기화 결과.
  * result: ok, held(비밀값으로 보이는 줄이 있는 파일만 커밋에서 뺌), failed. at은 ISO 시각
@@ -60,6 +63,8 @@ declare module 'claude-code' {
       prompts: PromptEntry[]
       /** 마지막 전체 동기화 결과. 상태 파일이 없거나 읽지 못하면 null */
       syncStatus: SyncStatus | null
+      /** 진행 중인 턴의 진행 상황. 턴을 시작할 때 0으로 되돌린다 */
+      turnProgress: TurnProgress
     }
   }
 }

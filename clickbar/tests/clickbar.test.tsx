@@ -79,7 +79,10 @@ test('작업 카드는 diff의 +/- 줄을 세고, 새 파일은 내용 줄 수�
   expect(text).toBe('파일 2개 +42 −7 (a.md, b.ts) · 컨텍스트 +8k · API 환산 ≈$0.12')
   // 남길 것이 없으면 빈 글이고, 중단된 턴은 "중단됨"만 남긴다
   expect(cardText({ files: new Map(), tokens: 0, usd: 0.001, isAborted: false })).toBe('')
-  expect(cardText({ files: new Map(), tokens: null, usd: null, isAborted: true })).toBe('중단됨')
+  // 파일을 고치지 않은 턴은 컨텍스트·비용이 늘었거나 중단됐어도 남기지 않는다
+  expect(cardText({ files: new Map(), tokens: null, usd: null, isAborted: true })).toBe('')
+  expect(cardText({ files: new Map(), tokens: 8000, usd: 0.4, isAborted: false })).toBe('')
+  expect(cardText({ files: new Map([['a.md', { add: 1, del: 0 }]]), tokens: null, usd: null, isAborted: true })).toBe('중단됨 · 파일 1개 +1 −0 (a.md)')
 })
 
 test('작업 카드: 턴 동안 Edit 결과를 모아 턴이 끝나면 한 줄을 남긴다', async ($, on) => {
@@ -114,6 +117,58 @@ test('작업 카드: 턴 동안 Edit 결과를 모아 턴이 끝나면 한 줄�
   await $.turn.start({ text: '고마워', turnId: 't2' })
   await $.turn.complete({ answer: '네', durationMs: 3000, isAborted: false, turnId: 't2', reason: 'answer' })
   expect(logged).toHaveLength(1)
+  // 질문·답변만 한 턴은 컨텍스트와 비용이 늘어도 줄을 남기지 않는다
+  await $.turn.start({ text: '설명해 줘', turnId: 't3' })
+  live = usage(61000, 1.5)
+  await $.turn.complete({ answer: '설명', durationMs: 9000, isAborted: false, turnId: 't3', reason: 'answer' })
+  expect(logged).toHaveLength(1)
+})
+
+test('스피너 줄: 이번 턴에 고친 파일 수와 메인 에이전트의 도구 호출 수를 "…" 앞에 붙인다', async ($, on) => {
+  const drawn: string[] = []
+  on('clock.now', () => ({ value: 0 }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', e => ({ result: { filePath: 'D:/all/a.md', structuredPatch: [{ lines: ['+x'] }] } }) as never)
+  // 엔진 자리: 플러그인이 넘긴 suffix를 받아 적는다
+  on('ui.render', { component: 'Spinner' }, (_, e) => {
+    drawn.push(e.props.suffix)
+    return { type: 'Text', props: {}, children: [e.props.word + e.props.suffix] } as never
+  })
+  const spin = (message: string | null = null) =>
+    $.ui.render({ surface: 'terminal', component: 'Spinner', props: { word: 'Pondering', message, suffix: '…', mode: 'tool-use' } } as never)
+
+  await $.turn.start({ text: '고쳐 줘', turnId: 't1' })
+  await spin()
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'u1', command: 'ls' } as never)
+  await $.tool.call({ tool: 'Edit', tool_use_id: 'u2', file_path: 'D:/all/a.md', old_string: 'y', new_string: 'x' } as never)
+  // 서브에이전트 안의 호출과 가정 기록 도구는 세지 않는다
+  await $.tool.call({ tool: 'Read', tool_use_id: 'u3', file_path: 'D:/all/a.md', agentId: 'sub1' } as never)
+  await $.tool.call({ tool: 'mcp__clickbar__log_assumption', tool_use_id: 'u4', assumptions: ['x'] } as never)
+  await spin()
+  // 엔진이 낱말 대신 안내를 보이는 동안은 손대지 않는다
+  await spin('Compacting conversation…')
+  // 새 턴은 0부터 센다
+  await $.turn.start({ text: '다음', turnId: 't2' })
+  await spin()
+  expect(drawn).toEqual(['…', ' · 파일 1개 수정 · 도구 2회…', '…', '…'])
+})
+
+test('band 상태 줄: 컨텍스트 값이 아직 없을 때의 "컨텍스트 —"도 폭에 넣어, 넘칠 API 환산액은 붙이지 않는다', async ($, on) => {
+  on('clock.now', () => ({ value: Date.parse('2026-10-08T05:00:00Z') }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  const rateLimits = [
+    { kind: 'five_hour' as const, percentUsed: 31, resetsAt: '2026-10-08T08:00:00Z' },
+    { kind: 'seven_day' as const, percentUsed: 95, resetsAt: '2026-10-11T05:00:00Z' },
+    { kind: 'spend_limit' as const, percentUsed: 46, resetsAt: '2026-11-01T00:00:00Z' },
+  ]
+  // 컨텍스트는 보고하지 않아(changed에 없음) 미터가 비어 있다
+  await $.session.measure({ context: { window: 1000000 }, rateLimits, cost: { usd: 3.84 }, changed: ['rateLimits', 'cost'] } as never)
+  const ui = await $.ui.mount({ plugin: 'clickbar', surface: 'terminal', ...band(112) })
+  expect(await ui.find({ type: 'Text', text: '—' })).toBeDefined()
+  expect(await ui.find({ key: 'band-limit-spend_limit' })).toBeDefined()
+  expect(await ui.find({ key: 'band-meter-cost' })).toBe(undefined)
+  await ui.unmount()
 })
 
 test('동기화 결과 파일로 [sync] 버튼의 이름과 색을 정한다: 보류·실패·하루 넘게 안 돎', async () => {

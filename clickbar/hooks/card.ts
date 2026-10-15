@@ -77,6 +77,15 @@ export type Card = {
   isAborted: boolean
 }
 
+/** 스피너 줄 끝에 붙이는 진행 상황: "파일 2개 수정 · 도구 7회". 둘 다 0이면 '' */
+export function progressText(progress: { files: number; tools: number }): string {
+  const parts: string[] = []
+  if (progress.files > 0) parts.push(`파일 ${progress.files}개 수정`)
+  if (progress.tools > 0) parts.push(`도구 ${progress.tools}회`)
+
+  return parts.join(' · ')
+}
+
 /** 오늘이면 시각만, 아니면 월/일도 붙인다 */
 export function whenText(ms: number, now: number): string {
   const d = new Date(ms)
@@ -88,20 +97,22 @@ export function whenText(ms: number, now: number): string {
 
 const SHOWN_FILES = 3
 
-/** 끝난 시각과 걸린 시간은 내장 줄(✻ Baked for 3m 30s · done 4:37 PM)이 보여 주므로 넣지 않는다. 남길 것이 없으면 '' */
+/**
+ * 끝난 시각과 걸린 시간은 내장 줄(✻ Baked for 3m 30s · done 4:37 PM)이 보여 주므로 넣지 않는다.
+ * 파일을 고친 턴에만 남긴다. 컨텍스트·비용만 늘어난 턴(질문·답변만 한 턴)까지 남기면 턴마다 한 줄씩 늘어나서다. 남길 것이 없으면 ''
+ */
 export function cardText(card: Card): string {
+  if (card.files.size === 0) return ''
   const parts: string[] = card.isAborted ? ['중단됨'] : []
-  if (card.files.size > 0) {
-    let add = 0
-    let del = 0
-    for (const d of card.files.values()) {
-      add += d.add
-      del += d.del
-    }
-    const names = [...card.files.keys()].map(path => path.split(/[\\/]/).pop() ?? path)
-    const shown = names.slice(0, SHOWN_FILES).join(', ') + (names.length > SHOWN_FILES ? ` 외 ${names.length - SHOWN_FILES}개` : '')
-    parts.push(`파일 ${names.length}개 +${add} −${del} (${shown})`)
+  let add = 0
+  let del = 0
+  for (const d of card.files.values()) {
+    add += d.add
+    del += d.del
   }
+  const names = [...card.files.keys()].map(path => path.split(/[\\/]/).pop() ?? path)
+  const shown = names.slice(0, SHOWN_FILES).join(', ') + (names.length > SHOWN_FILES ? ` 외 ${names.length - SHOWN_FILES}개` : '')
+  parts.push(`파일 ${names.length}개 +${add} −${del} (${shown})`)
   if (card.tokens !== null && card.tokens !== 0) parts.push(`컨텍스트 ${card.tokens > 0 ? '+' : '−'}${kTokens(Math.abs(card.tokens))}`)
   if (card.usd !== null && card.usd >= 0.005) parts.push(`API 환산 ≈$${card.usd.toFixed(2)}`)
 

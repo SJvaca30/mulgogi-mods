@@ -219,7 +219,8 @@ def hero():
     s.blank()
     s.flow(('❯ ', 'dim'), ('환불 API에도 같은 방식으로 적용해 줘', 'text'))
     s.blank()
-    s.flow(('✶', 'claude'), (' Pondering…', 'claude'), (' (8s · ↓ 1.2k tokens)', 'dim'))
+    # 스피너 줄 끝에 이번 턴의 진행 상황(수정한 파일 수·도구 호출 수)이 붙는다
+    s.flow(('✶', 'claude'), (' Pondering · 파일 1개 수정 · 도구 4회…', 'claude'), (' (8s · ↓ 1.2k tokens)', 'dim'))
     s.flow(('── clickbar ' + '─' * (COLS - 12 - 4), 'rule'), (' [-]', 'dim'))
     # 상태 줄: 항목마다 이름(기본색) 막대 비율(굵게) (설명, 흐리게), 항목 사이는 세 칸. 60%를 넘은 컨텍스트는 경고색
     s.flow(('컨텍스트 ', 'text'), ('███████░░░', 'warn'), (' ', 'text'), ('68%', 'warn b'), (' (자동 압축까지 290k)', 'dim'),

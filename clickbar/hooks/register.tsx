@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptFilled, Register, RenderSurface, SessionContextUsage, SessionUsage } from 'claude-code'
 
-import { addDelta, cardText, editDelta, whenText } from './card'
+import { addDelta, cardText, editDelta, progressText, whenText } from './card'
 import type { FileDelta } from './card'
 import { DEFAULT_FAVORITES, GROUPS, KO, NEEDS_ARGS, TIPS, keyGroupsFor, platformOf } from './catalog'
 import type { Platform } from './catalog'
@@ -54,6 +54,7 @@ const tipped = new Set<string>()
 const TIPS_SWITCH_KEY = 'tips'
 const assumptions = atom({ plugin: 'clickbar', key: 'assumptions' } as const, [])
 const syncStatus = atom({ plugin: 'clickbar', key: 'syncStatus' } as const, null)
+const progress = atom({ plugin: 'clickbar', key: 'turnProgress' } as const, { files: 0, tools: 0 })
 
 // [단축키] 탭이 보일 키의 OS. 세션을 시작할 때 환경 변수로 정한다(못 읽으면 목록을 적은 기준인 Windows)
 let platform: Platform = 'windows'
@@ -500,8 +501,18 @@ export const register: Register = on => {
   })
 
   // 턴 작업 카드. 집계가 실패해도 턴과 도구 호출에는 손대지 않는다
-  on('turn.start', (_, e, next) => {
+  on('turn.start', async ($, e, next) => {
     turn = { tokens: latest.tokens, usd: latest.usd, files: new Map() }
+    await update($, progress, () => ({ files: 0, tools: 0 }))
+
+    return next(e)
+  })
+
+  // 스피너 줄의 "도구 N회"는 메인 에이전트가 이번 턴에 부른 도구 수다. 서브에이전트 안의 호출과 가정 기록 도구는 세지 않는다
+  on('tool.call', async ($, e, next) => {
+    if (turn !== undefined && e.agentId === undefined && !ASSUME_TOOL_MATCH.test(e.tool)) {
+      await update($, progress, old => ({ ...old, tools: old.tools + 1 }))
+    }
 
     return next(e)
   })
@@ -510,7 +521,11 @@ export const register: Register = on => {
     const result = await next(e)
     try {
       const edit = turn !== undefined && result.deny === undefined && result.isError !== true ? editDelta(result.result) : null
-      if (turn !== undefined && edit !== null) addDelta(turn.files, edit.path, edit.delta)
+      if (turn !== undefined && edit !== null) {
+        addDelta(turn.files, edit.path, edit.delta)
+        const files = turn.files.size
+        await update($, progress, old => ({ ...old, files }))
+      }
     } catch (error) {
       $.ui.log(`clickbar: 작업 카드 집계 실패: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     }
@@ -558,6 +573,15 @@ export const register: Register = on => {
     return {}
   })
 
+  // 일하는 동안 스피너 줄에 이번 턴의 진행 상황을 붙인다: "✶ Pondering · 파일 2개 수정 · 도구 7회… (8s · ↓ 1.2k tokens)".
+  // suffix는 엔진의 "…" 자리라 그 앞에 끼워 넣는다. 엔진이 낱말 대신 안내(message)를 보이는 동안은 그대로 둔다
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    const extra = progressText(await read($, progress))
+    if (e.surface !== 'terminal' || e.props.message !== null || extra === '') return next(e)
+
+    return next({ ...e, props: { ...e.props, suffix: ` · ${extra}${e.props.suffix}` } })
+  })
+
   // 저장된 답변은 그대로 두고(ctrl+o·/copy는 원문) 화면에서만 바깥 펜스를 벗겨 표·제목을 마크다운으로 그린다
   on('ui.render', { component: 'AssistantMessage' }, async (_, e, next) => {
     const text = unfence(e.props.text)
@@ -575,9 +599,10 @@ export const register: Register = on => {
     const isNarrow = e.props.bodyColumns < NARROW_COLUMNS
     const toneColor = (t: 'normal' | 'warn' | 'bad' | undefined) => (t === 'bad' ? 'error' : t === 'warn' ? 'warning' : undefined)
     // 상태 줄 항목: 이름(기본색) · 막대 · 비율(굵게) · (설명, 흐리게). 넓을 때만 막대를 그린다
-    const contextItem: MeterItem | null =
+    // 새 세션이나 압축 직후처럼 아직 값이 없으면 "컨텍스트 —"로 둔다. 이 자리도 폭 계산에 넣는다
+    const contextItem: MeterItem =
       view === null
-        ? null
+        ? { key: 'band-meter-context', name: '컨텍스트', bar: '', figure: '', note: '—', tone: 'normal' }
         : {
             key: 'band-meter-context',
             name: '컨텍스트',
@@ -591,7 +616,7 @@ export const register: Register = on => {
       .map(l => limitView(l, now))
       .filter(l => !isNarrow || l.isHigh)
       .map(l => ({ key: `band-limit-${l.kind}`, name: l.name, bar: isWide ? bar(l.percent, LIMIT_BAR_CELLS) : '', figure: `${l.percent}%`, note: l.reset === '' ? '' : `(${l.reset})`, tone: l.tone }))
-    const meterItems = [...(contextItem === null ? [] : [contextItem]), ...limitItems]
+    const meterItems = [contextItem, ...limitItems]
     // API 환산액은 넓은 band에서, 나머지 항목과 한 줄에 들어갈 때만 붙인다(넘치면 줄이 두 줄로 바뀌며 흔들린다)
     const costItem: MeterItem | null =
       !isWide || stats.costUsd === null ? null : { key: 'band-meter-cost', name: 'API 환산', bar: '', figure: usdText(stats.costUsd), note: '', tone: 'normal' }
@@ -613,9 +638,11 @@ export const register: Register = on => {
               {it.bar}
             </Text>
           )}
-          <Text color={color} bold>
-            {it.figure}
-          </Text>
+          {it.figure !== '' && (
+            <Text color={color} bold>
+              {it.figure}
+            </Text>
+          )}
           {it.note !== '' && <Text dimColor>{it.note}</Text>}
         </Box>
       )
@@ -646,12 +673,6 @@ export const register: Register = on => {
         )}
         {/* 항목은 줄지 않는 묶음이라, 폭이 모자라면 항목째 다음 줄로 넘어간다. 구분 기호 대신 빈칸으로 띄워 줄 앞에 기호가 남지 않는다 */}
         <Box key="status" columnGap={METER_GAP} flexWrap="wrap">
-          {contextItem === null && (
-            <Box key="band-meter-context" columnGap={1}>
-              <Text>컨텍스트</Text>
-              <Text dimColor>—</Text>
-            </Box>
-          )}
           {meterItems.map(meterView)}
         </Box>
         {/* 버튼 이름은 모두 영어다. 명령이 있는 버튼은 그 명령 이름 그대로다(palette=/palette, assumptions=/assumptions).
