@@ -100,6 +100,11 @@ const agentsOf = (stdout: string) => {
   return Array.isArray(agents) ? (agents as HerdrAgent[]) : []
 }
 
+/** herdr status 출력(server: 아래 status: running|not running)에서 서버가 떠 있는지 */
+export function herdrServerRunning(stdout: string): boolean {
+  return /^server:\s*$[\s\S]*?^\s+status:\s*running\s*$/m.test(stdout.replace(/\r/g, ''))
+}
+
 /** herdr에 이 이름을 창 제목으로 띄운 Claude 패널이 있는지. 백그라운드 작업을 attach해서 보고 있는 곳을 찾을 때 쓴다 */
 export function herdrShows(stdout: string, name: string): boolean {
   const key = titleKey(name)

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TermLocator, TitleEntry, ViewMode } from '../types'
-import { herdrHost, herdrPaneByLabel, herdrShows, locatorFromEnv, orcaHost } from './hosts'
+import { herdrHost, herdrPaneByLabel, herdrServerRunning, herdrShows, locatorFromEnv, orcaHost } from './hosts'
 import type { TerminalHost } from './hosts'
 import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
 import type { Tone } from './panel'
@@ -289,9 +289,10 @@ async function loadView($: EngineInterface) {
 
 async function refreshPanel($: EngineInterface) {
   await safely($, '세션 목록 읽기', () => loadAgents($))
-  await safely($, '보는 곳 확인', () => checkViewer($))
   await safely($, '모든 대화 읽기', () => scanSessions($))
   await safely($, '보기 설정 읽기', () => loadView($))
+  // 버튼 모양은 같으므로 목록을 먼저 그리고, 누르기 전까지만 맞으면 된다
+  await safely($, '보는 곳 확인', () => checkViewer($))
 }
 
 // 저장값 고치기는 늘 새로 읽어 고친 뒤 쓴다. 여러 패널이 함께 열려 있어도 서로 덮어쓰지 않게
@@ -474,7 +475,9 @@ async function checkViewer($: EngineInterface) {
   const name = lastRows.find(r => r.isSelf)?.name ?? ''
   if (name === '') return
   const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 10_000 }).catch(() => null)
-  const herdr = await run(['herdr', 'agent', 'list'])
+  // herdr 서버가 떠 있을 때만 묻는다(herdr status는 서버를 띄우지 않고 상태만 알려 준다)
+  const status = await run(['herdr', 'status'])
+  const herdr = status !== null && status.exitCode === 0 && herdrServerRunning(status.stdout) ? await run(['herdr', 'agent', 'list']) : null
   let found: '' | 'orca' | 'herdr' = ''
   if (herdr !== null && herdr.exitCode === 0) {
     if (herdrShows(herdr.stdout, name)) found = 'herdr'

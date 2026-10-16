@@ -4,7 +4,7 @@ import type { TestBody } from 'claude-code/testing'
 import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
 import { DEFAULT_VIEW, arrange, buildItems, dayTitle, orcaHasPath, parseHistory, parseIdList, parseView, sinceText } from '../hooks/sessions'
 import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
-import { herdrCreated, herdrLines, herdrPaneByLabel, herdrPaneOf, locatorFromEnv, orcaHasTerminal } from '../hooks/hosts'
+import { herdrCreated, herdrLines, herdrPaneByLabel, herdrPaneOf, herdrServerRunning, locatorFromEnv, orcaHasTerminal } from '../hooks/hosts'
 import type { SessionRecord } from '../types'
 
 const NOW = Date.parse('2026-10-11T05:00:00Z')
@@ -187,7 +187,7 @@ const entry = (name: string, kind: 'file' | 'dir', mtimeMs = NOW, size = 100) =>
 
 // 세션 패널 테스트의 엔진 자리: 기록 폴더 목록, history.jsonl, $.store, claude agents, 제목 도우미(pwsh), Orca를 흉내 낸다.
 // liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다. noOrca면 orca 명령이 없는 일반 터미널, root는 이 세션의 폴더
-function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string; attachFails?: boolean; noWorktree?: boolean; windows?: boolean; records?: Record<string, string>; herdr?: boolean; herdrViewer?: 'title' | 'label' } = {}) {
+function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string; attachFails?: boolean; noWorktree?: boolean; windows?: boolean; records?: Record<string, string>; herdr?: boolean; herdrViewer?: 'title' | 'label'; herdrDown?: boolean } = {}) {
   const ran: string[][] = []
   const created: { title: string; command: string }[] = []
   const copies: string[] = []
@@ -263,6 +263,8 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
     const argv = [...e.argv]
     ran.push(argv)
     if (argv[0] === 'herdr') {
+      // herdr status: herdr를 쓰는 시험에서만 서버가 떠 있다
+      if (argv[1] === 'status') return ok(['server:', `  status: ${(opts.herdr || opts.herdrViewer) && !opts.herdrDown ? 'running' : 'not running'}`, '  socket: C:/x/herdr.sock'].join(String.fromCharCode(10)))
       if (argv[1] === 'agent' && argv[2] === 'list') {
         // 백그라운드 작업 2561affb-1은 작업을 처음 띄운 다른 패널(w1:p5)의 것으로 알려져 있다(세션 프로세스의 환경에서 온 값)
         return ok(JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [
@@ -539,6 +541,14 @@ for (const how of ['title', 'label'] as const) test(`세션 패널: 백그라운
   await ui.unmount()
 })
 
+test('세션 패널: herdr 서버가 떠 있지 않으면 백그라운드 작업이 보는 곳을 herdr에 묻지 않는다', async ($, on) => {
+  const host = panelHost(on, new Set(), { herdrViewer: 'title', herdrDown: true })
+  const ui = await openPanel($)
+  expect(host.ran).toContainEqual(['herdr', 'status'])
+  expect(host.ran.some(a => a[0] === 'herdr' && a[1] !== 'status')).toBe(false)
+  await ui.unmount()
+})
+
 test('터미널 호스트: herdr 응답에서 세션 패널·새 탭·화면을 꺼내고, 세션 위치는 herdr 패널을 Orca 탭보다 먼저 쓴다', async () => {
   const agents = JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [
     { pane_id: 'w1:p1', terminal_title_stripped: '다른 작업', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: 'aaa-1' } },
@@ -563,6 +573,10 @@ test('터미널 호스트: herdr 응답에서 세션 패널·새 탭·화면을 
   expect(herdrCreated(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w2:t4' }, root_pane: { pane_id: 'w2:p7' } } }))).toEqual({ tab: 'w2:t4', pane: 'w2:p7' })
   expect(herdrCreated('not json')).toBe(null)
   expect(herdrLines('a' + String.fromCharCode(10) + 'b')).toEqual(['a', 'b'])
+  const status = (server: string, eol: string) => ['client:', '  version: 0.9.4', '', 'server:', `  status: ${server}`, '  version: 0.9.4'].join(eol)
+  expect(herdrServerRunning(status('running', String.fromCharCode(10)))).toBe(true)
+  expect(herdrServerRunning(status('running', String.fromCharCode(13, 10)))).toBe(true)
+  expect(herdrServerRunning(status('not running', String.fromCharCode(10)))).toBe(false)
   expect(herdrLines(JSON.stringify({ id: '3', result: { type: 'pane_read', read: { text: 'a' + String.fromCharCode(10) + 'b' } } }))).toEqual(['a', 'b'])
   expect(locatorFromEnv({ herdrEnv: '1', herdrPane: 'w1:p2', orcaHandle: 'term_x' })).toEqual({ host: 'herdr', id: 'w1:p2' })
   expect(locatorFromEnv({ orcaHandle: 'term_x' })).toEqual({ host: 'orca', id: 'term_x' })
