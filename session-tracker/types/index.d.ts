@@ -1,6 +1,12 @@
 export type SessionStatus = 'working' | 'waiting' | 'idle' | 'ended'
 
-/** 세션 하나가 자기 파일에 쓰는 상태. at은 마지막으로 쓴 시각(1분마다 갱신), changedAt은 상태가 바뀐 시각 */
+/** 세션이 떠 있는 곳: Orca 탭 handle(ORCA_TERMINAL_HANDLE) 또는 herdr 패널 id(HERDR_PANE_ID). 세션이 시작할 때 자기 환경에서 읽는다 */
+export type TermLocator = { host: 'orca' | 'herdr'; id: string }
+
+/**
+ * 세션 하나가 자기 파일에 쓰는 상태. at은 마지막으로 쓴 시각(1분마다 갱신), changedAt은 상태가 바뀐 시각.
+ * term은 그 세션이 떠 있는 탭(세션 패널의 [이동]이 쓴다). 터미널 프로그램 밖이면 없다
+ */
 export type SessionRecord = {
   id: string
   root: string
@@ -8,6 +14,7 @@ export type SessionRecord = {
   prompt: string
   changedAt: number
   at: number
+  term?: TermLocator
 }
 
 /**
@@ -79,8 +86,10 @@ declare module 'claude-code' {
       renameDraft: string
       /** [끄기]를 한 번 누른 세션의 sessionId. 한 번 더 누르면 끈다. 아니면 '' */
       stopArmed: string
-      /** orca 명령을 쓸 수 있는지. 없으면(일반 터미널) [이동]·다른 대화 이름 고치기 대신 /resume·명령 복사를 보인다 */
+      /** orca 명령을 쓸 수 있는지. 다른 대화의 이름을 그 탭 입력창에 쳐서 고치는 기능은 Orca에서만 한다 */
       orcaReady: boolean
+      /** [이동]·[열기]에 쓰는 터미널 프로그램: herdr 패널 안이면 herdr, Orca를 쓸 수 있으면 orca, 아니면 ''(일반 터미널: /resume·명령 복사) */
+      host: '' | 'orca' | 'herdr'
       /** Orca 없이 [열기]·[이동]을 누른 대화의 sessionId(그 줄 아래에 여기서 열기·명령 복사가 열림), 아니면 '' */
       opening: string
       /** 새 Orca 탭에서 여는 중인 대화의 sessionId. 그 줄의 [이동]·[열기] 자리에 "여는 중…"을 보이고 다시 누르지 않게 한다 */

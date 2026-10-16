@@ -28,8 +28,11 @@ export function parseRecord(text: string): SessionRecord | null {
       typeof r.at === 'number' &&
       typeof r.changedAt === 'number' &&
       (r.status === 'working' || r.status === 'waiting' || r.status === 'idle' || r.status === 'ended')
+    if (!ok) return null
+    // 위치는 모양이 맞을 때만 받는다(예전 기록에는 없다)
+    const term = r.term !== undefined && (r.term.host === 'orca' || r.term.host === 'herdr') && typeof r.term.id === 'string' && r.term.id !== '' ? r.term : undefined
 
-    return ok ? (r as SessionRecord) : null
+    return { ...(r as SessionRecord), term }
   } catch {
     return null
   }

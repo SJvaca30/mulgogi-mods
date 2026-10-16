@@ -1,8 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
-import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TitleEntry, ViewMode } from '../types'
-import { cleanName, composerHasText, createdHandle, findTerminal, kindWord, launchVerdict, parseAgents, screenLines, selfKindView, stateCounts, stateWord } from './panel'
+import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TermLocator, TitleEntry, ViewMode } from '../types'
+import { herdrHost, locatorFromEnv, orcaHost } from './hosts'
+import type { TerminalHost } from './hosts'
+import { cleanName, composerHasText, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
 import type { Tone } from './panel'
 import { HEARTBEAT_MS, PROMPT_MAX, SKIP_OLDER_MS, STATUS_WORDS, agoText, alivePeers, firstLine, overlapNote, parseRecord, rootKey } from './records'
 import {
@@ -11,7 +13,6 @@ import {
   arrange,
   buildItems,
   isScratchProject,
-  orcaHasPath,
   parseHistory,
   pathKey,
   reopenCommand,
@@ -41,6 +42,7 @@ const renaming = atom({ plugin: 'session-tracker', key: 'renaming' } as const, '
 const renameDraft = atom({ plugin: 'session-tracker', key: 'renameDraft' } as const, '')
 const stopArmed = atom({ plugin: 'session-tracker', key: 'stopArmed' } as const, '')
 const orcaReady = atom({ plugin: 'session-tracker', key: 'orcaReady' } as const, false)
+const host = atom({ plugin: 'session-tracker', key: 'host' } as const, '')
 const opening = atom({ plugin: 'session-tracker', key: 'opening' } as const, '')
 const launching = atom({ plugin: 'session-tracker', key: 'launching' } as const, [])
 // 새 탭에서 Claude가 뜨기를 기다리는 최대 시간과 화면을 다시 읽는 간격. 넘기면 그 탭으로 옮기고 아직 여는 중이라고 알린다
@@ -106,7 +108,9 @@ async function init($: EngineInterface) {
   const dir = await stateDir($, root)
   if (dir === undefined) return
   const now = await $.clock.now()
-  self = { dir, record: { id: await $.session.id(), root, status: 'idle', prompt: '', changedAt: now, at: now } }
+  // 이 세션이 떠 있는 탭(Orca 탭 handle·herdr 패널 id). 다른 세션의 [이동]이 이 값으로 정확히 찾아온다
+  const term = locatorFromEnv({ herdrEnv: await $.env.get('HERDR_ENV'), herdrPane: await $.env.get('HERDR_PANE_ID'), orcaHandle: await $.env.get('ORCA_TERMINAL_HANDLE') })
+  self = { dir, record: { id: await $.session.id(), root, status: 'idle', prompt: '', changedAt: now, at: now, ...(term === null ? {} : { term }) } }
   await save($)
 }
 
@@ -355,42 +359,37 @@ async function openOff($: EngineInterface, item: SessionItem) {
 
 type LaunchResult = { kind: 'ok' | 'slow' } | { kind: 'failed'; reason: string; command: string }
 
+// [이동]·[열기]에 쓰는 터미널 프로그램(hosts.ts). herdr 패널 안이면 herdr, Orca를 쓸 수 있으면 Orca, 아니면 null(일반 터미널)
+async function termHost($: EngineInterface): Promise<TerminalHost | null> {
+  const name = await read($, host)
+  const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 20_000 })
+
+  return name === 'herdr' ? herdrHost(run) : name === 'orca' ? orcaHost(run) : null
+}
+
 /**
- * 새 Orca 탭에서 그 대화를 연다. 탭을 앞으로 띄우지 않고 열어, 화면에 Claude가 뜬 것을 확인한 뒤에만 그 탭으로 옮긴다.
+ * 새 탭에서 그 대화를 연다. 탭을 앞으로 띄우지 않고 열어, 화면에 Claude가 뜬 것을 확인한 뒤에만 그 탭으로 옮긴다.
  * 붙지 못하면 오류만 남은 셸 탭을 닫고 결과를 돌려준다(바로 띄우면, 실패했을 때 오류가 찍힌 셸 창만 남고 여기 알림은 보이지 않는다).
- * attach는 claude agents의 짧은 id만 받고 어느 폴더에서든 붙는다. resume은 기록을 폴더별로 찾으므로 그 폴더에서 실행한다.
- * 폴더가 Orca에 없으면 지금 작업 공간에 열고, resume이면 그 폴더로 옮긴 뒤 실행한다
+ * attach는 claude agents의 짧은 id만 받고 어느 폴더에서든 붙는다. resume은 기록을 폴더별로 찾으므로 그 폴더에서 실행한다
  */
-async function launchTab($: EngineInterface, item: SessionItem, how: 'attach' | 'resume'): Promise<LaunchResult> {
-  const worktrees = await $.process.run(['orca', 'worktree', 'list', '--json'], { timeoutMs: 15_000 })
-  const registered = worktrees.exitCode === 0 && orcaHasPath(worktrees.stdout, item.cwd)
-  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+async function launchTab($: EngineInterface, term: TerminalHost, item: SessionItem, how: 'attach' | 'resume'): Promise<LaunchResult> {
   const base = how === 'attach' ? `claude attach ${item.shortId}` : `claude --resume ${item.sessionId}`
-  const moved = !registered && how === 'resume'
-  const command = moved ? (isWindows ? `cd /d "${item.cwd}" && ${base}` : `cd '${item.cwd}' && ${base}`) : base
-  // cd /d는 cmd 문법이라, 폴더를 옮겨 실행할 때는 Windows에서 셸을 cmd로 정한다
-  const shell = moved && isWindows ? ['--shell', 'cmd.exe'] : []
-  const made = await $.process.run(
-    ['orca', 'terminal', 'create', '--worktree', registered ? `path:${item.cwd}` : 'active', '--title', item.name, '--command', command, ...shell, '--json'],
-    { timeoutMs: 20_000 },
-  )
-  const handle = made.exitCode === 0 ? createdHandle(made.stdout) : null
-  if (handle === null) return { kind: 'failed', reason: firstLine(made.stderr || made.stdout, 160) || 'Orca 탭을 만들지 못했습니다', command: base }
+  const made = await term.open({ item, command: base, needsCwd: how === 'resume', isWindows: (await $.env.get('OS')) === 'Windows_NT' })
+  if ('error' in made) return { kind: 'failed', reason: made.error, command: base }
   for (let waited = 0; waited < LAUNCH_TIMEOUT_MS; waited += LAUNCH_POLL_MS) {
     await $.clock.sleep(LAUNCH_POLL_MS)
-    const screen = await $.process.run(['orca', 'terminal', 'read', '--terminal', handle, '--screen', '--json'], { timeoutMs: 15_000 })
-    const verdict = launchVerdict(screenLines(screen.stdout), item.name)
+    const verdict = launchVerdict(await term.read(made.handle), item.name)
     if (verdict.kind === 'failed') {
-      await $.process.run(['orca', 'terminal', 'close', '--terminal', handle, '--tab', '--json'], { timeoutMs: 15_000 })
+      await term.close(made.handle)
       return { kind: 'failed', reason: verdict.reason, command: base }
     }
     if (verdict.kind === 'ok') break
     if (waited + LAUNCH_POLL_MS >= LAUNCH_TIMEOUT_MS) {
-      await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
+      await term.focus(made.handle)
       return { kind: 'slow' }
     }
   }
-  await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
+  await term.focus(made.handle)
 
   return { kind: 'ok' }
 }
@@ -401,15 +400,17 @@ async function launchTab($: EngineInterface, item: SessionItem, how: 'attach' | 
  */
 async function openSession($: EngineInterface, item: SessionItem, how: 'attach' | 'resume') {
   if ((await read($, launching)).includes(item.sessionId)) return
+  const term = await termHost($)
+  if (term === null) return
   await update($, launching, old => [...old, item.sessionId])
   $.ui.toast(`"${item.name}"을(를) 새 탭에서 여는 중입니다…`)
   try {
     const first = how === 'attach' && item.shortId !== '' ? 'attach' : 'resume'
-    let result = await launchTab($, item, first)
+    let result = await launchTab($, term, item, first)
     let fellBack = false
     if (result.kind === 'failed' && first === 'attach' && /No job matching/i.test(result.reason) && (await $.fs.exists(item.cwd))) {
       fellBack = true
-      result = await launchTab($, item, 'resume')
+      result = await launchTab($, term, item, 'resume')
     }
     $.ui.toast(
       result.kind === 'failed'
@@ -441,8 +442,8 @@ async function isLiveNow($: EngineInterface, item: SessionItem) {
   return true
 }
 
-// orca 명령을 쓸 수 있는지 세션마다 한 번 본다. Orca 안(ORCA_PANE_KEY)이면 묻지 않고, 밖이면 orca --version으로 본다.
-// 없으면 일반 터미널이라 [이동]·다른 대화 이름 고치기 대신 /resume·명령 복사를 보인다
+// [이동]·[열기]에 쓸 터미널 프로그램을 세션마다 한 번 정한다. herdr 패널 안(HERDR_ENV=1)이면 herdr를 쓴다(herdr는 자기 안에서만 조작하라고 정해 둔다).
+// 아니면 Orca: Orca 안(ORCA_PANE_KEY)이면 묻지 않고, 밖이면 orca --version으로 본다. 둘 다 없으면 일반 터미널이라 /resume·명령 복사를 보인다
 async function checkOrca($: EngineInterface) {
   let ready = (await $.env.get('ORCA_PANE_KEY')) !== undefined
   if (!ready) {
@@ -452,7 +453,36 @@ async function checkOrca($: EngineInterface) {
       ready = false
     }
   }
-  await update($, orcaReady, () => ready)
+  const inHerdr = (await $.env.get('HERDR_ENV')) === '1'
+  await update($, orcaReady, () => ready && !inHerdr)
+  await update($, host, () => (inHerdr ? 'herdr' : ready ? 'orca' : ''))
+}
+
+// 대상 세션이 자기 기록에 남긴 위치. 기록은 그 세션의 루트 폴더별로 두므로 작업 폴더로 먼저 찾고, 없으면 다른 폴더들을 본다
+async function locatorOf($: EngineInterface, item: SessionItem): Promise<TermLocator | null> {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  if (home === undefined) return null
+  const base = `${home}/.claude/mods-state/session-tracker`
+  const readAt = async (dir: string) => {
+    try {
+      return parseRecord(String(await $.fs.read(`${base}/${dir}/${item.sessionId}.json`)))?.term ?? null
+    } catch {
+      return null
+    }
+  }
+  const direct = await readAt(rootKey(item.cwd))
+  if (direct !== null) return direct
+  try {
+    for (const entry of await $.fs.list(base)) {
+      if (entry.kind !== 'dir' || entry.name === rootKey(item.cwd)) continue
+      const found = await readAt(entry.name)
+      if (found !== null) return found
+    }
+  } catch {
+    // 기록 폴더가 없으면 위치를 모른다
+  }
+
+  return null
 }
 
 // Orca 없이 그 대화를 이 터미널에서 연다(내장 /resume <id>). 꺼진 대화는 기록을 불러오고, 켜진 백그라운드 세션은
@@ -535,25 +565,32 @@ async function openPanel($: EngineInterface) {
   await refreshPanel($)
 }
 
-// 그 세션의 Orca 탭으로 옮긴다(탭 제목 = 세션 이름). 탭이 없는 백그라운드 세션은 새 탭에서 붙인다(openSession, ← 로 agent view,
-// 탭을 닫아도 세션은 계속 돈다). 탭이 없는 포그라운드 세션은 Orca 밖의 창에서 돌고 있어 여기서 열지 않는다(두 창이 한 기록에 쓰면 메시지가 섞인다)
+// 그 세션이 떠 있는 탭으로 옮긴다. 세션이 자기 기록에 남긴 위치로 먼저 찾고, 없으면 탭 제목(= 세션 이름)으로 찾는다.
+// 탭이 없는 백그라운드 세션은 새 탭에서 붙인다(openSession, ← 로 agent view, 탭을 닫아도 세션은 계속 돈다).
+// 탭이 없는 포그라운드 세션은 다른 창에서 돌고 있어 여기서 열지 않는다(두 창이 한 기록에 쓰면 메시지가 섞인다).
+// 다른 터미널 프로그램에서 도는 세션이면 그 프로그램을 쓰라고 알린다(herdr는 자기 안에서만 조작하게 되어 있다)
 async function switchTo($: EngineInterface, item: SessionItem) {
   const { name } = item
+  const term = await termHost($)
+  if (term === null) return
   try {
-    const list = await $.process.run(['orca', 'terminal', 'list', '--json'], { timeoutMs: 15_000 })
-    const handle = list.exitCode === 0 ? findTerminal(list.stdout, name) : null
+    const where = await locatorOf($, item)
+    if (where !== null && where.host !== term.name && item.kind === 'interactive') {
+      $.ui.toast(`"${name}"은(는) ${where.host === 'herdr' ? 'herdr' : 'Orca'}에서 실행 중입니다. 그 프로그램의 탭에서 이어 쓰세요`, { timeoutMs: 10000 })
+      return
+    }
+    const handle = await term.locate(item, where !== null && where.host === term.name ? where.id : null)
     if (handle !== null) {
-      const done = await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
-      if (done.exitCode !== 0) $.ui.toast(`Orca 탭으로 전환하지 못했습니다: ${firstLine(done.stderr || done.stdout, 120)}`)
+      if (!(await term.focus(handle))) $.ui.toast(`"${name}" 탭으로 전환하지 못했습니다`)
       return
     }
     if (item.kind === 'background') return await openSession($, item, 'attach')
     $.ui.toast(
-      `"${name}"은(는) Orca 탭에서 찾지 못했습니다. Orca 밖의 창(cmd 등)에서 실행 중이라 여기서 열지 않습니다. 그 창에서 이어 쓰거나, 그 창을 닫은 뒤 [열기]로 다시 여세요`,
+      `"${name}"은(는) ${term.name === 'herdr' ? 'herdr' : 'Orca'} 탭에서 찾지 못했습니다. 다른 창(cmd 등)에서 실행 중이라 여기서 열지 않습니다. 그 창에서 이어 쓰거나, 그 창을 닫은 뒤 [열기]로 다시 여세요`,
       { timeoutMs: 12000 },
     )
   } catch (error) {
-    $.ui.toast(`Orca를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
+    $.ui.toast(`"${name}" 탭으로 옮기지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -596,8 +633,9 @@ async function applyRename($: EngineInterface, row: SessionItem, raw: string) {
         $.ui.toast(`"${row.name}"은 입력이나 승인을 기다리는 중이라 이름을 바꾸지 않았습니다. 그 세션에서 답한 뒤 다시 하세요`, { timeoutMs: 10000 })
         return
       }
-      const list = await $.process.run(['orca', 'terminal', 'list', '--json'], { timeoutMs: 15_000 })
-      const handle = list.exitCode === 0 ? findTerminal(list.stdout, row.name) : null
+      // [이동]과 같은 방법으로 그 세션의 Orca 탭을 찾는다(세션이 남긴 탭 handle, 없으면 탭 제목)
+      const where = await locatorOf($, row)
+      const handle = await orcaHost(argv => $.process.run(argv, { timeoutMs: 15_000 })).locate(row, where?.host === 'orca' ? where.id : null)
       if (handle === null) {
         $.ui.toast(
           row.kind === 'background'
@@ -796,7 +834,10 @@ export const register: Register = on => {
     const hidden = await read($, archived)
     const inArchive = await read($, showArchived)
     // Orca가 없으면(일반 터미널) 다른 탭으로 옮기거나 다른 대화의 입력창에 대신 칠 수 없어, 줄 첫 칸과 이름 고치기를 바꿔 그린다
+    // 다른 대화의 이름을 그 탭 입력창에 쳐서 고치는 기능은 Orca에서만, [이동]·[열기]는 탭을 다루는 프로그램(Orca·herdr)이 있으면 쓴다
     const hasOrca = await read($, orcaReady)
+    const hostName = await read($, host)
+    const hasHost = hostName !== ''
     const openingId = await read($, opening)
     // 꺼진 대화를 이 터미널에서 열 수 있는지(같은 폴더인지) 볼 때 쓰는 이 세션의 폴더
     const here = self === undefined ? '' : pathKey(self.record.root)
@@ -891,8 +932,8 @@ export const register: Register = on => {
                 // 새 탭에서 Claude가 뜨기를 기다리는 동안은 누를 수 없게 글로만 보인다
                 <Text dimColor>여는 중…</Text>
               ) : isOff ? (
-                button(`agent-open-${it.sessionId}`, '열기', () => void (hasOrca ? openOff($, it) : toggleOpening(it)))
-              ) : hasOrca ? (
+                button(`agent-open-${it.sessionId}`, '열기', () => void (hasHost ? openOff($, it) : toggleOpening(it)))
+              ) : hasHost ? (
                 button(`agent-go-${it.sessionId}`, '이동', () => void switchTo($, it))
               ) : it.kind === 'background' ? (
                 button(`agent-go-${it.sessionId}`, '이동', () => void toggleOpening(it))
@@ -952,7 +993,7 @@ export const register: Register = on => {
             </Box>
           </Box>
           {isManaged && !inArchive && manageLine(it)}
-          {openingId === it.sessionId && !hasOrca && !inArchive && openLine(it)}
+          {openingId === it.sessionId && !hasHost && !inArchive && openLine(it)}
         </Box>
       )
     }
@@ -1072,11 +1113,12 @@ export const register: Register = on => {
             <Text dimColor>백그라운드: 탭을 닫아도 켜져 있음 · 포그라운드: 탭을 닫으면 꺼짐 · 유휴: 꺼져 있고 기록만 남음([열기]로 다시 켬)</Text>
             <Text dimColor>밑줄 친 이름을 누르면 바로 고칩니다(켜진 대화만) · [관리]: 고정·보관·끄기([끄기]는 두 번 눌러야 끔)</Text>
             <Text dimColor>목록은 15초마다 새로 읽습니다 · 고정·보관·보기 설정은 이 PC에만 저장 · [resume] 목록에서 Ctrl+A는 모든 폴더 · 패널은 Esc나 Ctrl+X X로도 닫힘</Text>
-            {!hasOrca && (
+            {!hasHost && (
               <Text dimColor>
-                Orca가 없어 다른 탭으로 옮기지 못합니다: [열기]·[이동]은 이 터미널에서 열거나(/resume) 새 탭용 명령을 복사합니다 · 다른 창의 대화는 그 창에서 쓰고 이름도 그 창에서 /rename
+                탭을 다루는 프로그램(Orca·herdr) 밖이라 다른 탭으로 옮기지 못합니다: [열기]·[이동]은 이 터미널에서 열거나(/resume) 새 탭용 명령을 복사합니다 · 다른 창의 대화는 그 창에서 쓰고 이름도 그 창에서 /rename
               </Text>
             )}
+            {hostName === 'herdr' && <Text dimColor>herdr 안에서는 다른 대화의 이름을 그 탭에서 /rename으로 바꿉니다</Text>}
           </Box>
         )}
       </Box>
