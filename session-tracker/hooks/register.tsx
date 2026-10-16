@@ -2,9 +2,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TermLocator, TitleEntry, ViewMode } from '../types'
-import { herdrHost, locatorFromEnv, orcaHost } from './hosts'
+import { herdrHost, herdrPaneByLabel, herdrShows, locatorFromEnv, orcaHost } from './hosts'
 import type { TerminalHost } from './hosts'
-import { cleanName, composerHasText, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
+import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
 import type { Tone } from './panel'
 import { HEARTBEAT_MS, PROMPT_MAX, SKIP_OLDER_MS, STATUS_WORDS, agoText, alivePeers, firstLine, overlapNote, parseRecord, rootKey } from './records'
 import {
@@ -289,6 +289,7 @@ async function loadView($: EngineInterface) {
 
 async function refreshPanel($: EngineInterface) {
   await safely($, '세션 목록 읽기', () => loadAgents($))
+  await safely($, '보는 곳 확인', () => checkViewer($))
   await safely($, '모든 대화 읽기', () => scanSessions($))
   await safely($, '보기 설정 읽기', () => loadView($))
 }
@@ -442,7 +443,12 @@ async function isLiveNow($: EngineInterface, item: SessionItem) {
   return true
 }
 
-// [이동]·[열기]에 쓸 터미널 프로그램을 세션마다 한 번 정한다. herdr 패널 안(HERDR_ENV=1)이면 herdr를 쓴다(herdr는 자기 안에서만 조작하라고 정해 둔다).
+// 시작할 때 환경으로 정한 터미널 프로그램. 백그라운드 작업은 보는 곳에 따라 바꾸고(checkViewer), 보는 곳을 모르면 이 값으로 돌아간다
+let envHost: '' | 'orca' | 'herdr' = ''
+// orca 명령을 쓸 수 있는지(herdr 안이어도). 백그라운드 작업을 Orca 탭에서 보고 있는지 볼 때 쓴다
+let orcaAvailable = false
+
+// [이동]·[열기]에 쓸 터미널 프로그램을 세션마다 한 번 정한다. herdr 패널 안(HERDR_ENV=1)이면 herdr를 쓴다.
 // 아니면 Orca: Orca 안(ORCA_PANE_KEY)이면 묻지 않고, 밖이면 orca --version으로 본다. 둘 다 없으면 일반 터미널이라 /resume·명령 복사를 보인다
 async function checkOrca($: EngineInterface) {
   let ready = (await $.env.get('ORCA_PANE_KEY')) !== undefined
@@ -454,8 +460,36 @@ async function checkOrca($: EngineInterface) {
     }
   }
   const inHerdr = (await $.env.get('HERDR_ENV')) === '1'
-  await update($, orcaReady, () => ready && !inHerdr)
-  await update($, host, () => (inHerdr ? 'herdr' : ready ? 'orca' : ''))
+  orcaAvailable = ready
+  envHost = inHerdr ? 'herdr' : ready ? 'orca' : ''
+  await update($, orcaReady, () => envHost === 'orca')
+  await update($, host, () => envHost)
+}
+
+// 백그라운드 작업의 화면은 사용자가 attach한 탭(claude attach·claude agents)에 뜨지만, 작업 프로세스의 환경은 처음 띄운 곳의 것이다.
+// 그래서 세션 패널을 읽을 때마다 이 세션을 띄운 탭이 herdr나 Orca에 있는지 보고, 있으면 그 프로그램을 쓴다.
+// herdr는 창 제목(claude agents로 들어가면 세션 이름이 된다)과, 이 mod가 연 탭의 이름표로 찾는다(claude attach는 창 제목을 바꾸지 않는다)
+async function checkViewer($: EngineInterface) {
+  if ((await read($, selfKind)) !== 'background') return
+  const name = lastRows.find(r => r.isSelf)?.name ?? ''
+  if (name === '') return
+  const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 10_000 }).catch(() => null)
+  const herdr = await run(['herdr', 'agent', 'list'])
+  let found: '' | 'orca' | 'herdr' = ''
+  if (herdr !== null && herdr.exitCode === 0) {
+    if (herdrShows(herdr.stdout, name)) found = 'herdr'
+    else {
+      const tabs = await run(['herdr', 'tab', 'list'])
+      if (tabs !== null && tabs.exitCode === 0 && herdrPaneByLabel(herdr.stdout, tabs.stdout, name) !== null) found = 'herdr'
+    }
+  }
+  if (found === '' && orcaAvailable) {
+    const orca = await run(['orca', 'terminal', 'list', '--json'])
+    if (orca !== null && orca.exitCode === 0 && findTerminal(orca.stdout, name) !== null) found = 'orca'
+  }
+  const next = found === '' ? envHost : found
+  await update($, host, () => next)
+  await update($, orcaReady, () => next === 'orca')
 }
 
 // 대상 세션이 자기 기록에 남긴 위치. 기록은 그 세션의 루트 폴더별로 두므로 작업 폴더로 먼저 찾고, 없으면 다른 폴더들을 본다
@@ -568,7 +602,7 @@ async function openPanel($: EngineInterface) {
 // 그 세션이 떠 있는 탭으로 옮긴다. 세션이 자기 기록에 남긴 위치로 먼저 찾고, 없으면 탭 제목(= 세션 이름)으로 찾는다.
 // 탭이 없는 백그라운드 세션은 새 탭에서 붙인다(openSession, ← 로 agent view, 탭을 닫아도 세션은 계속 돈다).
 // 탭이 없는 포그라운드 세션은 다른 창에서 돌고 있어 여기서 열지 않는다(두 창이 한 기록에 쓰면 메시지가 섞인다).
-// 다른 터미널 프로그램에서 도는 세션이면 그 프로그램을 쓰라고 알린다(herdr는 자기 안에서만 조작하게 되어 있다)
+// 다른 터미널 프로그램에서 도는 세션이면 그 프로그램을 쓰라고 알린다
 async function switchTo($: EngineInterface, item: SessionItem) {
   const { name } = item
   const term = await termHost($)

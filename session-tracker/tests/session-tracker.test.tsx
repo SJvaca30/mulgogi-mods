@@ -187,7 +187,7 @@ const entry = (name: string, kind: 'file' | 'dir', mtimeMs = NOW, size = 100) =>
 
 // 세션 패널 테스트의 엔진 자리: 기록 폴더 목록, history.jsonl, $.store, claude agents, 제목 도우미(pwsh), Orca를 흉내 낸다.
 // liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다. noOrca면 orca 명령이 없는 일반 터미널, root는 이 세션의 폴더
-function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string; attachFails?: boolean; noWorktree?: boolean; windows?: boolean; records?: Record<string, string>; herdr?: boolean } = {}) {
+function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string; attachFails?: boolean; noWorktree?: boolean; windows?: boolean; records?: Record<string, string>; herdr?: boolean; herdrViewer?: 'title' | 'label' } = {}) {
   const ran: string[][] = []
   const created: { title: string; command: string }[] = []
   const copies: string[] = []
@@ -268,16 +268,20 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
         return ok(JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [
           { pane_id: 'w1:p2', tab_id: 'w1:t2', terminal_title_stripped: 'SSO 연동', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: '7148776f-1' } },
           { pane_id: 'w1:p5', tab_id: 'w1:t5', terminal_title_stripped: '다른 작업', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: '2561affb-1' } },
+          // 이 세션(백그라운드 작업)을 herdr 패널에서 attach해 보고 있다. 창 제목 = 세션 이름(앞에 상태 표시)
+          // claude agents로 들어가면 창 제목이 세션 이름이 되고, claude attach는 셸 제목을 그대로 둔다(그때는 이 mod가 단 탭 이름표로 찾는다)
+          ...(opts.herdrViewer ? [{ pane_id: 'w1:p1', tab_id: 'w1:t1', terminal_title_stripped: opts.herdrViewer === 'title' ? '✳ Claude mods 편의 기능 아이디어' : '관리자: pwsh.exe', agent_session: null }] : []),
           // 연 탭에 붙은 Claude. 창 제목은 세션 이름이 아니다
           ...herdrTabs.map(t => ({ pane_id: 'w1:p9', tab_id: t.tab_id, terminal_title_stripped: 'Claude Code', agent_session: null })),
         ] } }))
       }
-      if (argv[1] === 'tab' && argv[2] === 'list') return ok(JSON.stringify({ id: '5', result: { type: 'tab_list', tabs: [{ tab_id: 'w1:t2', label: 'SSO 연동' }, ...herdrTabs] } }))
+      if (argv[1] === 'tab' && argv[2] === 'list') return ok(JSON.stringify({ id: '5', result: { type: 'tab_list', tabs: [{ tab_id: 'w1:t2', label: 'SSO 연동' }, ...(opts.herdrViewer === 'label' ? [{ tab_id: 'w1:t1', label: 'Claude mods 편의 기능 아이디어' }] : []), ...herdrTabs] } }))
       if (argv[1] === 'tab' && argv[2] === 'create') {
         herdrTabs.push({ tab_id: 'w1:t9', label: argv[argv.indexOf('--label') + 1] ?? '' })
         return ok(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w1:t9' }, root_pane: { pane_id: 'w1:p9' } } }))
       }
-      if (argv[1] === 'pane' && argv[2] === 'read') return ok(JSON.stringify({ id: '3', result: { type: 'pane_read', read: { text: `${'─'.repeat(30)} frontend 2 ─${String.fromCharCode(10)}❯ ` } } }))
+      // 실제 herdr CLI는 pane read에 화면 글을 그대로 찍는다(JSON 봉투 없음, herdr 0.9.4에서 확인)
+      if (argv[1] === 'pane' && argv[2] === 'read') return ok(`${'─'.repeat(30)} frontend 2 ─${String.fromCharCode(10)}❯ `)
       return ok(JSON.stringify({ id: '4', result: { type: 'ok' } }))
     }
     if (opts.noOrca && argv[0] === 'orca') return { value: { exitCode: 127, stdout: '', stderr: 'orca: command not found', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -513,12 +517,25 @@ test('세션 패널 herdr: 세션 id로 패널을 찾아 옮기고, 탭 없는 �
   expect(host.ran).toContainEqual(['herdr', 'tab', 'create', '--cwd', 'D:\\other-project', '--label', 'frontend 2', '--no-focus'])
   expect(host.ran).toContainEqual(['herdr', 'pane', 'run', 'w1:p9', 'claude attach 2561affb'])
   expect(host.ran).toContainEqual(['herdr', 'tab', 'focus', 'w1:t9'])
+  // 화면에서 Claude가 뜬 것을 알아보고 옮겼다(15초를 다 기다린 "아직 열리는 중"이 아니다)
+  expect(host.toasts.some(t => t.includes('아직 열리는 중'))).toBe(false)
   // 다시 누르면 새 탭을 또 열지 않고, 이름표로 그 탭을 찾아 옮긴다
   await ui.press({ key: 'agent-go-2561affb-1' })
   expect(host.ran.filter(a => a[0] === 'herdr' && a[1] === 'tab' && a[2] === 'create')).toHaveLength(1)
   expect(host.ran).toContainEqual(['herdr', 'agent', 'focus', 'w1:p9'])
   // herdr 안에서는 Orca를 부르지 않는다
   expect(host.ran.some(a => a[0] === 'orca' && a[2] === 'create')).toBe(false)
+  await ui.unmount()
+})
+
+for (const how of ['title', 'label'] as const) test(`세션 패널: 백그라운드 작업을 herdr에서 attach해 보고 있으면(${how === 'title' ? '창 제목으로' : '탭 이름표로'} 찾음), 작업 환경이 Orca여도 [이동]은 herdr로 옮긴다`, async ($, on) => {
+  const record = JSON.stringify({ id: '7148776f-1', root: 'D:\other-project', status: 'idle', prompt: '', changedAt: NOW, at: NOW, term: { host: 'herdr', id: 'w1:p2' } })
+  const host = panelHost(on, new Set(), { herdrViewer: how, records: { '7148776f-1': record } })
+  const ui = await openPanel($)
+  await ui.press({ key: 'agent-go-7148776f-1' })
+  expect(host.ran).toContainEqual(['herdr', 'agent', 'focus', 'w1:p2'])
+  expect(host.ran.some(a => a[0] === 'orca' && a[2] === 'switch')).toBe(false)
+  expect(host.toasts.some(t => t.includes('실행 중입니다'))).toBe(false)
   await ui.unmount()
 })
 
@@ -545,6 +562,7 @@ test('터미널 호스트: herdr 응답에서 세션 패널·새 탭·화면을 
   expect(herdrPaneByLabel(inTab, tabs, '없는 이름')).toBe(null)
   expect(herdrCreated(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w2:t4' }, root_pane: { pane_id: 'w2:p7' } } }))).toEqual({ tab: 'w2:t4', pane: 'w2:p7' })
   expect(herdrCreated('not json')).toBe(null)
+  expect(herdrLines('a' + String.fromCharCode(10) + 'b')).toEqual(['a', 'b'])
   expect(herdrLines(JSON.stringify({ id: '3', result: { type: 'pane_read', read: { text: 'a' + String.fromCharCode(10) + 'b' } } }))).toEqual(['a', 'b'])
   expect(locatorFromEnv({ herdrEnv: '1', herdrPane: 'w1:p2', orcaHandle: 'term_x' })).toEqual({ host: 'herdr', id: 'w1:p2' })
   expect(locatorFromEnv({ orcaHandle: 'term_x' })).toEqual({ host: 'orca', id: 'term_x' })

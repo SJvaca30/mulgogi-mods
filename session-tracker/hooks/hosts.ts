@@ -92,20 +92,34 @@ function herdrResult(stdout: string): Record<string, unknown> | null {
 
 type HerdrAgent = { pane_id?: unknown; tab_id?: unknown; terminal_title_stripped?: unknown; agent_session?: { kind?: unknown; value?: unknown } | null }
 
+// 창 제목 앞의 상태 표시(✳ 등)를 떼고 비교한다(Orca 탭 제목을 찾는 findTerminal과 같은 방법)
+const titleKey = (title: string) => title.replace(/^[^\p{L}\p{N}]+/u, '').trim()
+const agentsOf = (stdout: string) => {
+  const agents = herdrResult(stdout)?.agents
+
+  return Array.isArray(agents) ? (agents as HerdrAgent[]) : []
+}
+
+/** herdr에 이 이름을 창 제목으로 띄운 Claude 패널이 있는지. 백그라운드 작업을 attach해서 보고 있는 곳을 찾을 때 쓴다 */
+export function herdrShows(stdout: string, name: string): boolean {
+  const key = titleKey(name)
+
+  return key !== '' && agentsOf(stdout).some(a => typeof a.terminal_title_stripped === 'string' && titleKey(a.terminal_title_stripped) === key)
+}
+
 /**
  * herdr agent list에서 이 세션이 떠 있는 패널. 포그라운드 세션은 herdr의 Claude 연동이 패널마다 알려 둔 세션 id, 그다음 세션이
  * 자기 기록에 남긴 패널(hint)로 찾는다. 둘 다 세션 프로세스의 환경에서 온 값이라, 백그라운드 작업은 작업을 처음 띄운 곳의 패널을
  * 가리킬 수 있어 쓰지 않는다. 마지막으로 탭 제목(= 세션 이름)으로 찾는다
  */
 export function herdrPaneOf(stdout: string, item: Pick<SessionItem, 'sessionId' | 'name' | 'kind'>, hint: string | null): string | null {
-  const result = herdrResult(stdout)
-  const agents = Array.isArray(result?.agents) ? (result.agents as HerdrAgent[]) : []
+  const agents = agentsOf(stdout)
   const interactive = item.kind === 'interactive'
   const sessionOf = (a: HerdrAgent) => (a.agent_session?.kind === 'id' && typeof a.agent_session.value === 'string' ? a.agent_session.value : null)
   const bySession = interactive ? agents.find(a => sessionOf(a) === item.sessionId) : undefined
   // 기록의 패널은 지금도 Claude가 떠 있고 다른 세션이 차지하지 않았을 때만 믿는다(herdr는 닫거나 옮긴 패널의 id를 다시 쓰지 않는다)
   const byHint = interactive && hint !== null ? agents.find(a => a.pane_id === hint && (sessionOf(a) ?? item.sessionId) === item.sessionId) : undefined
-  const byTitle = agents.find(a => typeof a.terminal_title_stripped === 'string' && a.terminal_title_stripped.trim() === item.name)
+  const byTitle = agents.find(a => typeof a.terminal_title_stripped === 'string' && titleKey(a.terminal_title_stripped) === titleKey(item.name))
   const hit = bySession ?? byHint ?? byTitle
 
   return hit !== undefined && typeof hit.pane_id === 'string' ? hit.pane_id : null
@@ -122,8 +136,7 @@ export function herdrPaneByLabel(agentsOut: string, tabsOut: string, name: strin
       .filter(t => typeof t.tab_id === 'string' && typeof t.label === 'string' && t.label.trim() === name)
       .map(t => t.tab_id),
   )
-  const agents = herdrResult(agentsOut)?.agents
-  const hit = (Array.isArray(agents) ? (agents as HerdrAgent[]) : []).find(a => labeled.has(a.tab_id))
+  const hit = agentsOf(agentsOut).find(a => labeled.has(a.tab_id))
 
   return hit !== undefined && typeof hit.pane_id === 'string' ? hit.pane_id : null
 }
@@ -137,11 +150,11 @@ export function herdrCreated(stdout: string): { tab: string; pane: string } | nu
   return typeof tab === 'string' && typeof pane === 'string' ? { tab, pane } : null
 }
 
-/** herdr pane read 결과의 화면 줄 */
+/** herdr pane read 결과의 화면 줄. CLI는 화면 글을 그대로 찍는다(herdr 0.9.4에서 확인). API 응답 모양({ result: { read: { text } } })도 받는다 */
 export function herdrLines(stdout: string): string[] {
   const text = (herdrResult(stdout)?.read as { text?: unknown } | undefined)?.text
 
-  return typeof text === 'string' ? text.split('\n') : []
+  return (typeof text === 'string' ? text : stdout).split('\n')
 }
 
 export function herdrHost(run: Run): TerminalHost {
