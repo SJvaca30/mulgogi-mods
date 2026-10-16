@@ -4,7 +4,7 @@ import type { TestBody } from 'claude-code/testing'
 import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
 import { DEFAULT_VIEW, arrange, buildItems, dayTitle, orcaHasPath, parseHistory, parseIdList, parseView, sinceText } from '../hooks/sessions'
 import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
-import { herdrCreated, herdrLines, herdrPaneOf, locatorFromEnv, orcaHasTerminal } from '../hooks/hosts'
+import { herdrCreated, herdrLines, herdrPaneByLabel, herdrPaneOf, locatorFromEnv, orcaHasTerminal } from '../hooks/hosts'
 import type { SessionRecord } from '../types'
 
 const NOW = Date.parse('2026-10-11T05:00:00Z')
@@ -194,6 +194,8 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
   const toasts: string[] = []
   const commands: { command: string; args?: string }[] = []
   const store = new Map<string, unknown>()
+  // 가짜 herdr에서 이 mod가 연 탭(이름표 = 세션 이름)
+  const herdrTabs: { tab_id: string; label: string }[] = []
   on('env.get', (_, e) => ({
     value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? 'C:/Users/me/.claude/jobs/abc12345' : e.name === 'OS' && opts.windows ? 'Windows_NT' : e.name === 'HERDR_ENV' && opts.herdr ? '1' : undefined,
   }))
@@ -266,9 +268,15 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
         return ok(JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [
           { pane_id: 'w1:p2', tab_id: 'w1:t2', terminal_title_stripped: 'SSO 연동', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: '7148776f-1' } },
           { pane_id: 'w1:p5', tab_id: 'w1:t5', terminal_title_stripped: '다른 작업', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: '2561affb-1' } },
+          // 연 탭에 붙은 Claude. 창 제목은 세션 이름이 아니다
+          ...herdrTabs.map(t => ({ pane_id: 'w1:p9', tab_id: t.tab_id, terminal_title_stripped: 'Claude Code', agent_session: null })),
         ] } }))
       }
-      if (argv[1] === 'tab' && argv[2] === 'create') return ok(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w1:t9' }, root_pane: { pane_id: 'w1:p9' } } }))
+      if (argv[1] === 'tab' && argv[2] === 'list') return ok(JSON.stringify({ id: '5', result: { type: 'tab_list', tabs: [{ tab_id: 'w1:t2', label: 'SSO 연동' }, ...herdrTabs] } }))
+      if (argv[1] === 'tab' && argv[2] === 'create') {
+        herdrTabs.push({ tab_id: 'w1:t9', label: argv[argv.indexOf('--label') + 1] ?? '' })
+        return ok(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w1:t9' }, root_pane: { pane_id: 'w1:p9' } } }))
+      }
       if (argv[1] === 'pane' && argv[2] === 'read') return ok(JSON.stringify({ id: '3', result: { type: 'pane_read', read: { text: `${'─'.repeat(30)} frontend 2 ─${String.fromCharCode(10)}❯ ` } } }))
       return ok(JSON.stringify({ id: '4', result: { type: 'ok' } }))
     }
@@ -505,6 +513,10 @@ test('세션 패널 herdr: 세션 id로 패널을 찾아 옮기고, 탭 없는 �
   expect(host.ran).toContainEqual(['herdr', 'tab', 'create', '--cwd', 'D:\\other-project', '--label', 'frontend 2', '--no-focus'])
   expect(host.ran).toContainEqual(['herdr', 'pane', 'run', 'w1:p9', 'claude attach 2561affb'])
   expect(host.ran).toContainEqual(['herdr', 'tab', 'focus', 'w1:t9'])
+  // 다시 누르면 새 탭을 또 열지 않고, 이름표로 그 탭을 찾아 옮긴다
+  await ui.press({ key: 'agent-go-2561affb-1' })
+  expect(host.ran.filter(a => a[0] === 'herdr' && a[1] === 'tab' && a[2] === 'create')).toHaveLength(1)
+  expect(host.ran).toContainEqual(['herdr', 'agent', 'focus', 'w1:p9'])
   // herdr 안에서는 Orca를 부르지 않는다
   expect(host.ran.some(a => a[0] === 'orca' && a[2] === 'create')).toBe(false)
   await ui.unmount()
@@ -525,6 +537,12 @@ test('터미널 호스트: herdr 응답에서 세션 패널·새 탭·화면을 
   expect(herdrPaneOf(agents, fg('zzz-9', '없는 이름'), 'w1:p3')).toBe('w1:p3')
   expect(herdrPaneOf(agents, fg('zzz-9', '없는 이름'), 'w1:p1')).toBe(null)
   expect(herdrPaneOf(agents, fg('zzz-9', '없는 이름'), 'w1:p8')).toBe(null)
+  // 이름표가 세션 이름인 탭에 Claude가 떠 있으면 그 패널, 탭에 Claude가 없으면 없음
+  const tabs = JSON.stringify({ id: '5', result: { type: 'tab_list', tabs: [{ tab_id: 'w1:t1', label: '붙인 작업' }, { tab_id: 'w1:t6', label: '빈 탭' }] } })
+  const inTab = JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [{ pane_id: 'w1:p4', tab_id: 'w1:t1', terminal_title_stripped: 'Claude Code', agent_session: null }] } })
+  expect(herdrPaneByLabel(inTab, tabs, '붙인 작업')).toBe('w1:p4')
+  expect(herdrPaneByLabel(inTab, tabs, '빈 탭')).toBe(null)
+  expect(herdrPaneByLabel(inTab, tabs, '없는 이름')).toBe(null)
   expect(herdrCreated(JSON.stringify({ id: '2', result: { type: 'tab_created', tab: { tab_id: 'w2:t4' }, root_pane: { pane_id: 'w2:p7' } } }))).toEqual({ tab: 'w2:t4', pane: 'w2:p7' })
   expect(herdrCreated('not json')).toBe(null)
   expect(herdrLines(JSON.stringify({ id: '3', result: { type: 'pane_read', read: { text: 'a' + String.fromCharCode(10) + 'b' } } }))).toEqual(['a', 'b'])

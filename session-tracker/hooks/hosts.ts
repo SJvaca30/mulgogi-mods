@@ -90,7 +90,7 @@ function herdrResult(stdout: string): Record<string, unknown> | null {
   }
 }
 
-type HerdrAgent = { pane_id?: unknown; terminal_title_stripped?: unknown; agent_session?: { kind?: unknown; value?: unknown } | null }
+type HerdrAgent = { pane_id?: unknown; tab_id?: unknown; terminal_title_stripped?: unknown; agent_session?: { kind?: unknown; value?: unknown } | null }
 
 /**
  * herdr agent list에서 이 세션이 떠 있는 패널. 포그라운드 세션은 herdr의 Claude 연동이 패널마다 알려 둔 세션 id, 그다음 세션이
@@ -107,6 +107,23 @@ export function herdrPaneOf(stdout: string, item: Pick<SessionItem, 'sessionId' 
   const byHint = interactive && hint !== null ? agents.find(a => a.pane_id === hint && (sessionOf(a) ?? item.sessionId) === item.sessionId) : undefined
   const byTitle = agents.find(a => typeof a.terminal_title_stripped === 'string' && a.terminal_title_stripped.trim() === item.name)
   const hit = bySession ?? byHint ?? byTitle
+
+  return hit !== undefined && typeof hit.pane_id === 'string' ? hit.pane_id : null
+}
+
+/**
+ * 이름표(label)가 세션 이름인 탭에 떠 있는 Claude 패널. 이 mod는 새 탭을 열 때 이름표에 세션 이름을 단다.
+ * 그 탭에 붙은 Claude가 창 제목을 세션 이름으로 바꾸지 않아도, 다음 [이동]이 새 탭을 또 열지 않고 그 탭을 찾는다
+ */
+export function herdrPaneByLabel(agentsOut: string, tabsOut: string, name: string): string | null {
+  const tabs = herdrResult(tabsOut)?.tabs
+  const labeled = new Set(
+    (Array.isArray(tabs) ? (tabs as { tab_id?: unknown; label?: unknown }[]) : [])
+      .filter(t => typeof t.tab_id === 'string' && typeof t.label === 'string' && t.label.trim() === name)
+      .map(t => t.tab_id),
+  )
+  const agents = herdrResult(agentsOut)?.agents
+  const hit = (Array.isArray(agents) ? (agents as HerdrAgent[]) : []).find(a => labeled.has(a.tab_id))
 
   return hit !== undefined && typeof hit.pane_id === 'string' ? hit.pane_id : null
 }
@@ -132,8 +149,12 @@ export function herdrHost(run: Run): TerminalHost {
     name: 'herdr',
     async locate(item, hint) {
       const list = await run(['herdr', 'agent', 'list'])
+      if (list.exitCode !== 0) return null
+      const pane = herdrPaneOf(list.stdout, item, hint)
+      if (pane !== null) return pane
+      const tabs = await run(['herdr', 'tab', 'list'])
 
-      return list.exitCode === 0 ? herdrPaneOf(list.stdout, item, hint) : null
+      return tabs.exitCode === 0 ? herdrPaneByLabel(list.stdout, tabs.stdout, item.name) : null
     },
     async focus(handle) {
       // 새로 연 탭은 "탭|패널", 찾은 세션은 패널 id다
