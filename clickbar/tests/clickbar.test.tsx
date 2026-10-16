@@ -145,12 +145,15 @@ test('스피너 줄: 이번 턴에 고친 파일 수와 메인 에이전트의 �
   await $.tool.call({ tool: 'Read', tool_use_id: 'u3', file_path: 'D:/all/a.md', agentId: 'sub1' } as never)
   await $.tool.call({ tool: 'mcp__clickbar__log_assumption', tool_use_id: 'u4', assumptions: ['x'] } as never)
   await spin()
+  // 서브에이전트·팀원의 턴이 시작돼도(2.1.299부터 turn.start가 그 턴에도 온다) 메인 턴의 개수를 지우지 않는다
+  await $.turn.start({ text: '조사해 줘', turnId: 's1', agentId: 'sub1' } as never)
+  await spin()
   // 엔진이 낱말 대신 안내를 보이는 동안은 손대지 않는다
   await spin('Compacting conversation…')
   // 새 턴은 0부터 센다
   await $.turn.start({ text: '다음', turnId: 't2' })
   await spin()
-  expect(drawn).toEqual(['…', ' · 파일 1개 수정 · 도구 2회…', '…', '…'])
+  expect(drawn).toEqual(['…', ' · 파일 1개 수정 · 도구 2회…', ' · 파일 1개 수정 · 도구 2회…', '…', '…'])
 })
 
 test('band 상태 줄: 컨텍스트 값이 아직 없을 때의 "컨텍스트 —"도 폭에 넣어, 넘칠 API 환산액은 붙이지 않는다', async ($, on) => {

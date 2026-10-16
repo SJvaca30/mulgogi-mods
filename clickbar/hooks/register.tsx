@@ -545,6 +545,8 @@ export const register: Register = on => {
 
   // 턴 작업 카드. 집계가 실패해도 턴과 도구 호출에는 손대지 않는다
   on('turn.start', async ($, e, next) => {
+    // 2.1.299부터 서브에이전트·팀원의 턴에도 온다(e.agentId가 있다). 이번 턴의 진행·요약은 메인 대화의 턴만 새로 센다
+    if ((e as { agentId?: string }).agentId !== undefined) return next(e)
     turn = { tokens: latest.tokens, usd: latest.usd, files: new Map() }
     await update($, progress, () => ({ files: 0, tools: 0 }))
 

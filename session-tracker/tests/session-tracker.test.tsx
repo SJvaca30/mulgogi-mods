@@ -730,6 +730,27 @@ test('질문(AskUserQuestion)·계획 승인(ExitPlanMode)은 권한 판정이 �
   expect(mine()).toBe('waiting')
 })
 
+test('다른 세션에 보이는 "요청"은 사람이 직접 보낸 질문만이다: 서브에이전트의 턴과 알림으로 시작한 턴은 요청을 바꾸지 않는다', async ($, on) => {
+  const files = new Map<string, string>()
+  fakeHost(on, files, undefined)
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  const mine = () => JSON.parse(files.get(norm('C:/Users/me/.claude/mods-state/session-tracker/D-all/me.json')) ?? '{}')
+  await $.prompt.submit({ text: '로그인 화면 고쳐 줘', wait: false, origin: { kind: 'composer' } })
+  await $.turn.start({ text: '로그인 화면 고쳐 줘', turnId: 't1' })
+  expect(mine().status).toBe('working')
+  expect(mine().prompt).toBe('로그인 화면 고쳐 줘')
+  // 2.1.299부터 서브에이전트의 턴에도 turn.start가 온다
+  await $.turn.start({ text: '저장소를 조사해 줘', turnId: 's1', agentId: 'sub1' } as never)
+  expect(mine().prompt).toBe('로그인 화면 고쳐 줘')
+  // 백그라운드 작업의 알림으로 시작한 턴
+  await $.prompt.submit({ text: '<task-notification>끝남</task-notification>', wait: false, origin: { kind: 'task-notification' } } as never)
+  await $.turn.start({ text: '<task-notification>끝남</task-notification>', turnId: 't2' })
+  expect(mine().status).toBe('working')
+  expect(mine().prompt).toBe('로그인 화면 고쳐 줘')
+})
+
 test('이름 고치기 준비: 다른 세션 입력창이 비었는지 화면으로 보고, 이름은 한 줄 60자로 정리한다', async () => {
   const screen = (lines: string[]) => JSON.stringify({ ok: true, result: { terminal: { tail: lines } } })
   const border = '─'.repeat(40)

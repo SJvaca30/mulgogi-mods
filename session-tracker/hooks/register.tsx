@@ -95,6 +95,8 @@ let self: { dir: string; record: SessionRecord } | undefined
 let lastRows: AgentRow[] = []
 // lastRows를 마지막으로 읽은 시각. band에 보일 세션의 이름을 모를 때 다시 읽는 간격을 지킨다
 let agentsAt = 0
+// 사람이 직접 보낸 마지막 질문(prompt.submit에서 받아 다음 메인 턴의 요청으로 쓴다)
+let userText: string | undefined
 // history.jsonl은 바뀌었을 때만 다시 읽는다
 let historyCache: { m: number; s: number; map: Map<string, HistoryInfo> } | undefined
 // $.store 키: 보기 설정, 고정, 보관, 제목 캐시(기록 파일 끝에서 읽은 것), 켜져 있을 때 본 이름
@@ -796,7 +798,12 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     const result = await next(e)
-    await safely($, '작업 시작 기록', () => setStatus($, 'working', e.text.trim() === '' ? undefined : e.text))
+    // 2.1.299부터 서브에이전트·팀원의 턴에도 온다(e.agentId가 있다). 이 세션의 상태·요청은 메인 대화의 턴만 바꾼다
+    if ((e as { agentId?: string }).agentId !== undefined) return result
+    // 요청은 사람이 직접 보낸 질문만 쓴다. 알림·예약 작업·다른 세션의 메시지로 시작한 턴은 앞 요청을 그대로 둔다
+    const text = userText
+    userText = undefined
+    await safely($, '작업 시작 기록', () => setStatus($, 'working', text === undefined || text.trim() === '' ? undefined : text))
 
     return result
   })
@@ -835,6 +842,8 @@ export const register: Register = on => {
 
   // 다른 세션이 같은 폴더에서 작업 중일 때만 Claude에게 한 줄을 붙인다. 질문 글은 바꾸지 않는다
   on('prompt.submit', async ($, e, next) => {
+    // 입력창(composer)이나 Remote Control로 사람이 보낸 질문만 다음 턴의 요청으로 기억한다
+    if (e.origin.kind === 'composer' || e.origin.kind === 'bridge') userText = e.text
     let note: string | null = null
     try {
       if ((await $.store.get(NOTE_SWITCH_KEY)) !== 'off') note = overlapNote(await read($, peers), liveName)
