@@ -828,7 +828,8 @@ export const register: Register = on => {
 
   // 승인을 받아 도구가 실제로 돌기 시작하면 다시 "작업 중"이다
   on('tool.call', async ($, e, next) => {
-    if (self?.record.status === 'waiting') await safely($, '작업 재개 기록', () => setStatus($, 'working'))
+    // 메인 대화의 도구만 본다. 메인이 답을 기다리는 동안 서브에이전트가 도구를 써도 "입력 필요"는 그대로다
+    if (e.agentId === undefined && self?.record.status === 'waiting') await safely($, '작업 재개 기록', () => setStatus($, 'working'))
 
     return next(e)
   })

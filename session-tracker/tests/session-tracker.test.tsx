@@ -724,6 +724,9 @@ test('질문(AskUserQuestion)·계획 승인(ExitPlanMode)은 권한 판정이 �
   expect(mine()).toBe('idle')
   await $.tool.check({ tool: 'AskUserQuestion', input: { questions: [] } })
   expect(mine()).toBe('waiting')
+  // 메인 대화가 답을 기다리는 동안 서브에이전트가 도구를 써도 "입력 필요"는 그대로다
+  await $.tool.call({ tool: 'Read', file_path: 'D:/all/a.md', agentId: 'sub1' } as never)
+  expect(mine()).toBe('waiting')
   await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
   expect(mine()).toBe('working')
   await $.tool.check({ tool: 'ExitPlanMode', input: {} })
