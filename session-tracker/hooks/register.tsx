@@ -4,9 +4,9 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TermLocator, TitleEntry, ViewMode } from '../types'
 import { herdrHost, herdrPaneByLabel, herdrServerRunning, herdrShows, locatorFromEnv, orcaHost } from './hosts'
 import type { TerminalHost } from './hosts'
-import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
+import { cleanName, clipName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
 import type { Tone } from './panel'
-import { HEARTBEAT_MS, PROMPT_MAX, SKIP_OLDER_MS, STATUS_WORDS, agoText, alivePeers, firstLine, overlapNote, parseRecord, rootKey } from './records'
+import { HEARTBEAT_MS, PROMPT_MAX, SKIP_OLDER_MS, STATUS_WORDS, activePeers, alivePeers, firstLine, overlapNote, parseRecord, rootKey, spanText } from './records'
 import {
   DEFAULT_VIEW,
   TITLE_SCRIPT,
@@ -65,6 +65,16 @@ const COL_KIND = 11
 const RULE_LABEL = '── 세션 '
 const RULE_LABEL_WIDTH = 8
 const PEER_TONE: Record<Exclude<SessionStatus, 'ended'>, Tone> = { waiting: 'warning', working: 'success', idle: 'muted' }
+// 판정과 상관없이 사람의 답을 기다리는 도구(질문, 계획 승인)
+const NEEDS_PERSON = new Set(['AskUserQuestion', 'ExitPlanMode'])
+// band에서 다른 세션 이름 버튼의 최대 칸 수와, 한 줄에 이름으로 보일 최대 세션 수
+const PEER_NAME_MAX = 18
+const PEERS_SHOWN = 2
+
+// claude agents가 아는 켜진 세션의 이름. 모르면 undefined
+function liveName(id: string): string | undefined {
+  return lastRows.find(r => r.sessionId === id && r.isLive)?.name
+}
 
 // 날짜별 보기에서 줄 끝에 붙이는 폴더 이름: 경로의 마지막 부분(예: D 드라이브의 all 폴더 → all)
 function folderLabel(cwd: string): string {
@@ -83,6 +93,8 @@ function toneProps(tone: Tone): { color?: 'warning' | 'success'; bold?: boolean;
 let self: { dir: string; record: SessionRecord } | undefined
 // 마지막으로 읽은 claude agents --json --all(켜진 것과 멈춘 백그라운드 세션)
 let lastRows: AgentRow[] = []
+// lastRows를 마지막으로 읽은 시각. band에 보일 세션의 이름을 모를 때 다시 읽는 간격을 지킨다
+let agentsAt = 0
 // history.jsonl은 바뀌었을 때만 다시 읽는다
 let historyCache: { m: number; s: number; map: Map<string, HistoryInfo> } | undefined
 // $.store 키: 보기 설정, 고정, 보관, 제목 캐시(기록 파일 끝에서 읽은 것), 켜져 있을 때 본 이름
@@ -146,7 +158,11 @@ async function refresh($: EngineInterface) {
       // 다른 세션이 쓰는 도중이면 다음 갱신 때 다시 읽는다
     }
   }
-  await update($, peers, () => alivePeers(records, self?.record.id ?? '', self?.record.root ?? '', now))
+  const list = alivePeers(records, self?.record.id ?? '', self?.record.root ?? '', now)
+  await update($, peers, () => list)
+  // band는 겹칠 수 있는 세션을 이름으로 보인다. 이름을 모르는 세션이 있으면 claude agents를 다시 읽는다(1분에 한 번까지)
+  const unnamed = activePeers(list).some(p => !lastRows.some(r => r.sessionId === p.id && r.isLive))
+  if (unnamed && now - agentsAt > 60_000) await safely($, '세션 이름 읽기', () => loadAgents($))
 }
 
 // 실행하는 프로그램은 claude, orca, 그리고 꺼진 대화 제목을 읽는 pwsh 도우미로만 고정한다
@@ -155,6 +171,7 @@ async function loadAgents($: EngineInterface) {
   const run = await $.process.run(['claude', 'agents', '--json', '--all'], { timeoutMs: 20_000 })
   if (run.exitCode === 0) {
     lastRows = parseAgents(run.stdout, self?.record.id ?? '')
+    agentsAt = await $.clock.now()
     const rows = lastRows.filter(r => r.isLive)
     await update($, agents, () => rows)
     // 시작할 때 환경변수로 짐작한 종류를 claude agents의 판정으로 바로잡는다
@@ -602,6 +619,14 @@ async function openPanel($: EngineInterface) {
   await refreshPanel($)
 }
 
+// band에서 다른 세션의 이름을 눌렀을 때. 탭을 다루는 프로그램(Orca·herdr)이 있으면 그 세션으로 옮기고, 없으면 세션 패널을 연다
+async function goToPeer($: EngineInterface, sessionId: string) {
+  const row = lastRows.find(r => r.sessionId === sessionId && r.isLive)
+  if (row === undefined || (await read($, host)) === '') return await openPanel($)
+  const kind = row.kind === 'interactive' ? 'interactive' : 'background'
+  await switchTo($, { sessionId: row.sessionId, shortId: row.shortId, name: row.name, cwd: row.cwd, state: row.state, kind, isSelf: false, at: 0, reopen: '' })
+}
+
 // 그 세션이 떠 있는 탭으로 옮긴다. 세션이 자기 기록에 남긴 위치로 먼저 찾고, 없으면 탭 제목(= 세션 이름)으로 찾는다.
 // 탭이 없는 백그라운드 세션은 새 탭에서 붙인다(openSession, ← 로 agent view, 탭을 닫아도 세션은 계속 돈다).
 // 탭이 없는 포그라운드 세션은 다른 창에서 돌고 있어 여기서 열지 않는다(두 창이 한 기록에 쓰면 메시지가 섞인다).
@@ -781,11 +806,13 @@ export const register: Register = on => {
     return result
   })
 
-  // 권한 판정이 "물어봄"이면 권한 창이 뜬다. bypass 모드에서는 물어보지 않으므로 이 상태가 되지 않는다.
+  // 권한 판정이 "물어봄"이면 권한 창이 뜬다. bypass 모드에서는 도구 승인을 묻지 않지만, 질문(AskUserQuestion)·계획 승인(ExitPlanMode)은
+  // 판정과 상관없이 사람의 답을 기다린다(판정이 허용이어도 창이 닫히지 않는다).
   // classic.Notification은 Team 플랜에서 user mod에 오지 않아(2026-10-11 확인) tool.check의 결과로 판단한다
   on('tool.check', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined && result.decision === 'ask') await safely($, '승인 대기 기록', () => setStatus($, 'waiting'))
+    const asks = result.decision === 'ask' || (NEEDS_PERSON.has(e.tool) && result.decision !== 'deny')
+    if (e.agentId === undefined && asks) await safely($, '입력 필요 기록', () => setStatus($, 'waiting'))
 
     return result
   })
@@ -808,7 +835,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     let note: string | null = null
     try {
-      if ((await $.store.get(NOTE_SWITCH_KEY)) !== 'off') note = overlapNote(await read($, peers))
+      if ((await $.store.get(NOTE_SWITCH_KEY)) !== 'off') note = overlapNote(await read($, peers), liveName)
     } catch (error) {
       log($, '안내 만들기', error)
     }
@@ -1171,12 +1198,16 @@ export const register: Register = on => {
       return {}
     }
     await refresh($)
+    // 쉬는 세션까지 모두 이름으로 보인다(band에는 겹칠 수 있는 세션만 나온다)
+    await safely($, '세션 이름 읽기', () => loadAgents($))
     const list = await read($, peers)
     const now = await $.clock.now()
     $.ui.toast(
       list.length === 0
         ? '같은 폴더에서 열린 다른 세션이 없습니다(이 mod가 켜진 세션만 보입니다)'
-        : list.map(p => `${p.id.slice(0, 8)} ${STATUS_WORDS[p.status as Exclude<SessionStatus, 'ended'>]} · ${agoText(now - p.changedAt)} · ${firstLine(p.prompt, 80) || '(아직 요청 없음)'}`).join('\n'),
+        : list
+            .map(p => `${liveName(p.id) ?? `세션 ${p.id.slice(0, 8)}`} · ${STATUS_WORDS[p.status as Exclude<SessionStatus, 'ended'>]} ${spanText(now - p.changedAt)} · ${firstLine(p.prompt, 80) || '(아직 요청 없음)'}`)
+            .join('\n'),
       { timeoutMs: 12000 },
     )
 
@@ -1186,16 +1217,15 @@ export const register: Register = on => {
   // clickbar 등 다른 mod가 그린 줄은 그대로 두고, 그 위에 이 대화의 종류와 같은 폴더의 다른 세션을 한 줄로 더한다
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const list = await read($, peers)
+    // 다른 세션 칸에는 이 세션과 겹칠 수 있는 세션(작업 중·입력 필요)만 이름으로 보인다. Claude에게 붙이는 안내와 같은 기준이다.
+    // 쉬는 세션은 겹치지 않고 할 일도 없어 보이지 않는다(전체 목록은 /sessions, /sessions-here)
+    const active = activePeers(await read($, peers))
     const kind = selfKindView(await read($, selfKind))
-    if (list.length === 0 && kind === null) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    if (active.length === 0 && kind === null) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const rows = await read($, agents)
     const now = await $.clock.now()
     const others = await next(e)
-    // 다른 세션은 상태별 개수로 줄이고, 겹칠 위험이 있는 작업 중·승인 대기 세션만 요청을 보여 준다
-    const peerCounts = (['waiting', 'working', 'idle'] as const)
-      .map(status => ({ status, n: list.filter(p => p.status === status).length }))
-      .filter(c => c.n > 0)
     // 위의 clickbar 줄과 섞여 보이지 않게 "── 세션 ───" 가로줄을 band 폭에 맞춰 긋는다. 너무 좁으면 머리 글 없이 줄만
     const width = e.props.bodyColumns
     const rule = e.surface !== 'terminal' || width <= 0 ? null : width >= RULE_LABEL_WIDTH ? RULE_LABEL + '─'.repeat(width - RULE_LABEL_WIDTH) : '─'.repeat(width)
@@ -1207,10 +1237,10 @@ export const register: Register = on => {
             {rule}
           </Text>
         )}
-        {/* 한 줄에 이 대화의 종류, 같은 폴더의 다른 세션 개수를 차례로 둔다. │·같은 구분 기호 대신 빈칸으로 띄워
+        {/* 한 줄에 이 대화의 종류, 같은 폴더에서 겹칠 수 있는 다른 세션을 차례로 둔다. │·같은 구분 기호 대신 빈칸으로 띄워
             좁아서 꺾일 때 줄 맨 앞에 기호가 남지 않게 하고, 꺾여도 빈 줄이 끼지 않도록 가로 간격만 둔다.
             안쪽에 또 꺾이는 상자를 두면 그 상자가 한 줄을 다 차지하므로 항목을 한 단계로 늘어놓는다.
-            항목 사이는 clickbar 상태 줄처럼 세 칸이다. 배지와 "작업 중 1" 같은 개수 글은 줄지 않게 해서 쪼개지지 않고, 요청 미리보기만 남는 폭 안에서 꺾인다 */}
+            항목 사이는 clickbar 상태 줄처럼 세 칸이다. 배지·이름 버튼·"작업 중 3분째"는 줄지 않게 해서 쪼개지지 않고, 요청 미리보기만 남는 폭 안에서 줄어든다 */}
         <Box key="peers" columnGap={3} rowGap={0} flexWrap="wrap">
           {kind !== null && (
             <Box key="self-kind" columnGap={1} flexShrink={1}>
@@ -1222,28 +1252,40 @@ export const register: Register = on => {
               <Text dimColor>{kind.hint}</Text>
             </Box>
           )}
-          {list.length > 0 && (
+          {active.length > 0 && (
             <Box key="peer-label" flexShrink={0}>
-              <Text dimColor>같은 폴더 다른 세션 {list.length}개:</Text>
+              <Text dimColor>같은 폴더:</Text>
             </Box>
           )}
-          {peerCounts.map(c => {
-            // 작업 중·승인 대기는 겹칠 위험이 있어, 가장 최근 것 하나의 요청을 개수 옆에 붙인다
-            const latest = c.status === 'idle' ? undefined : list.find(p => p.status === c.status)
+          {active.slice(0, PEERS_SHOWN).map(p => {
+            // 이름을 누르면 그 세션으로 옮긴다(Orca·herdr가 없으면 세션 패널). 이름을 아직 모르면 세션 id 앞자리로 보인다
+            const name = clipName(rows.find(r => r.sessionId === p.id)?.name ?? `세션 ${p.id.slice(0, 8)}`, PEER_NAME_MAX)
+            const status = p.status as Exclude<SessionStatus, 'ended'>
+            const request = firstLine(p.prompt, 24)
 
             return (
-              <Box key={`peer-count-${c.status}`} columnGap={1} flexShrink={1}>
+              <Box key={`peer-${p.id}`} columnGap={1} flexShrink={1}>
                 <Box flexShrink={0}>
-                  <Text {...toneProps(PEER_TONE[c.status])}>{`${STATUS_WORDS[c.status]} ${c.n}`}</Text>
+                  <Button key={`peer-go-${p.id}`} plain label={`[${name}]`} onPress={() => void safely($, '다른 세션으로 이동', () => goToPeer($, p.id))}>
+                    <Text color="suggestion">{`[${name}]`}</Text>
+                  </Button>
                 </Box>
-                {latest !== undefined && (
-                  <Box key={`peer-${latest.id}`} flexShrink={1}>
-                    <Text dimColor>{`("${firstLine(latest.prompt, 24) || '요청 없음'}" ${agoText(now - latest.changedAt)})`}</Text>
+                <Box flexShrink={0}>
+                  <Text {...toneProps(PEER_TONE[status])}>{`${STATUS_WORDS[status]} ${spanText(now - p.changedAt)}`}</Text>
+                </Box>
+                {request !== '' && (
+                  <Box flexShrink={1}>
+                    <Text dimColor wrap="truncate-end">{`"${request}"`}</Text>
                   </Box>
                 )}
               </Box>
             )
           })}
+          {active.length > PEERS_SHOWN && (
+            <Box key="peer-more" flexShrink={0}>
+              <Text dimColor>{`외 ${active.length - PEERS_SHOWN}개`}</Text>
+            </Box>
+          )}
         </Box>
         {others}
       </Box>

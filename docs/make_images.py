@@ -244,8 +244,9 @@ def hero():
     s.flow(('[compact] [context]', 'sug'), (' │ ', 'dim'), ('[resume] [sessions] [fork]', 'sug'), (' │ ', 'dim'),
            ('[copy] [quote] [btw]', 'sug'), (' │ ', 'dim'), ('[tasks] [palette]', 'sug'))
     s.flow(('── 세션 ' + '─' * (COLS - 8), 'rule'))
-    s.flow((' 백그라운드 ', 'sug chip b'), (' 탭을 닫아도 켜져 있음 · 끄기 /stop', 'dim'), ('   같은 폴더 다른 세션 2개:', 'dim'),
-           ('   작업 중 1', 'succ'), (' ("버그 찾아 줘" 3분 전)', 'dim'), ('   대기 중 1', 'dim'))
+    # 같은 폴더에서 겹칠 수 있는 다른 세션(작업 중·입력 필요)만 이름 버튼·상태·이어진 시간·요청으로 보인다. 쉬는 세션은 보이지 않는다
+    s.flow((' 백그라운드 ', 'sug chip b'), (' 탭을 닫아도 켜져 있음 · 끄기 /stop', 'dim'), ('   같은 폴더:', 'dim'),
+           ('   [결제 오류 수정]', 'sug'), (' 작업 중 3분째', 'succ'), (' "버그 찾아 줘"', 'dim'))
     s.flow(('─' * (COLS - 11) + ' shop-api ─', 'rule'))
     s.line((0, '❯ ', 'text'), (2, ' ', 'text cursor'))
     s.flow(('─' * COLS, 'rule'))

@@ -84,6 +84,24 @@ export function selfKindView(kind: string): { badge: string; color: 'suggestion'
   return null
 }
 
+// 터미널에서 차지하는 칸 수: 한글·한자·전각 문자와 그림 문자는 두 칸
+const cellWidth = (c: string) => (/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1faff}]/u.test(c) ? 2 : 1)
+
+/** 이름이 max칸을 넘으면 줄여 끝에 …를 붙인다. band에서 이름 버튼 하나가 한 줄을 다 차지하지 않게 한다 */
+export function clipName(name: string, max: number): string {
+  const chars = [...name]
+  if (chars.reduce((n, c) => n + cellWidth(c), 0) <= max) return name
+  const kept: string[] = []
+  let used = 0
+  for (const c of chars) {
+    if (used + cellWidth(c) > max - 1) break
+    kept.push(c)
+    used += cellWidth(c)
+  }
+
+  return `${kept.join('').trimEnd()}…`
+}
+
 /** 이름 입력을 정리한다: 줄바꿈·제어 문자를 빼고, 공백을 하나로 줄이고, 60자로 자른다 */
 export function cleanName(raw: string): string {
   return raw

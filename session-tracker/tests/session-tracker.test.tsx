@@ -1,9 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
+import { cleanName, clipName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
 import { DEFAULT_VIEW, arrange, buildItems, dayTitle, orcaHasPath, parseHistory, parseIdList, parseView, sinceText } from '../hooks/sessions'
-import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
+import { activePeers, alivePeers, overlapNote, parseRecord, rootKey, spanText } from '../hooks/records'
 import { herdrCreated, herdrLines, herdrPaneByLabel, herdrPaneOf, herdrServerRunning, locatorFromEnv, orcaHasTerminal } from '../hooks/hosts'
 import type { SessionRecord } from '../types'
 
@@ -44,6 +44,15 @@ test('같은 폴더의 살아 있는 다른 세션만 고르고, 끝났거나 �
 
 test('Claude에게 붙이는 안내는 다른 세션이 작업 중일 때만 만든다', async () => {
   expect(overlapNote([rec({ status: 'idle' })])).toBe(null)
+  // 이름을 알면 이름과 요청을 함께 알린다
+  expect(overlapNote([rec({})], id => (id === 'other' ? 'SSO 연동' : undefined))).toBe(
+    '참고(session-tracker): 같은 폴더에서 다른 Claude 세션 1개가 작업 중이다(SSO 연동: "결제 API 오류 고쳐 줘"). 같은 파일을 동시에 고치지 않도록, 겹칠 것 같으면 먼저 사용자에게 확인하라.',
+  )
+  // 겹칠 수 있는 세션은 입력을 기다리는 세션이 먼저, 쉬는 세션은 빠진다
+  expect(activePeers([rec({ id: 'w', changedAt: NOW }), rec({ id: 'i', status: 'idle' }), rec({ id: 'q', status: 'waiting', changedAt: NOW - 600_000 })]).map(r => r.id)).toEqual(['q', 'w'])
+  expect(spanText(30_000)).toBe('방금')
+  expect(spanText(3 * 60_000)).toBe('3분째')
+  expect(spanText(2 * 3600_000)).toBe('2시간째')
   expect(overlapNote([rec({})])).toBe(
     '참고(session-tracker): 같은 폴더에서 다른 Claude 세션 1개가 작업 중이다(요청: "결제 API 오류 고쳐 줘"). 같은 파일을 동시에 고치지 않도록, 겹칠 것 같으면 먼저 사용자에게 확인하라.',
   )
@@ -109,8 +118,30 @@ test('세션이 시작되면 자기 상태를 쓰고, band에서 다른 세션 �
   // CLAUDE_JOB_DIR가 없으면 포그라운드 세션이다
   expect(await ui.find({ type: 'Text', text: ' 포그라운드 ' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '탭을 닫으면 꺼짐 · 유지 /background' })).toBeDefined()
-  // 다른 세션은 상태별 개수로 줄인다
-  expect(await ui.find({ type: 'Text', text: '작업 중 1' })).toBeDefined()
+  // 겹칠 수 있는 세션은 이름(모르면 세션 id 앞자리)·상태·이어진 시간·요청으로 보인다
+  expect(await ui.find({ type: 'Text', text: '같은 폴더:' })).toBeDefined()
+  expect(await ui.find({ key: 'peer-go-other' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[세션 other]' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '작업 중 2분째' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '"결제 API 오류 고쳐 줘"' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('band: 같은 폴더의 다른 세션이 쉬고 있기만 하면 다른 세션 칸을 보이지 않는다(겹칠 일도 할 일도 없다)', async ($, on) => {
+  const dir = 'C:/Users/me/.claude/mods-state/session-tracker/D-all'
+  const files = new Map([[norm(`${dir}/other.json`), JSON.stringify(rec({ status: 'idle' }))]])
+  fakeHost(on, files, undefined)
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['CLICKBAR'] }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: /같은 폴더/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /대기 중/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ' 포그라운드 ' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -240,6 +271,8 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
   })
   on('fs.list', (_, e) => {
     const p = norm(e.path)
+    // 이 폴더(D:\all) 세션들의 상태 기록: records로 준 것을 그대로 둔다(다른 폴더 기록은 root가 달라 다른 세션 칸에 들지 않는다)
+    if (p.endsWith('/mods-state/session-tracker/d-all')) return { value: Object.keys(opts.records ?? {}).map(id => entry(`${id}.json`, 'file')) }
     if (p.endsWith('/.claude/projects')) return { value: [entry('D--all', 'dir'), entry('D--other-project', 'dir'), entry('C--Users-FS-AppData-Local-Temp-x', 'dir')] }
     if (p.endsWith('/projects/d--all')) {
       return {
@@ -549,6 +582,27 @@ test('세션 패널: herdr 서버가 떠 있지 않으면 백그라운드 작업
   await ui.unmount()
 })
 
+test('band: 같은 폴더에서 작업 중인 세션은 claude agents의 이름으로 보이고, 이름을 누르면 그 세션의 탭으로 옮긴다', async ($, on) => {
+  const working = JSON.stringify({ id: '96394c1c-1', root: 'D:\\all', status: 'working', prompt: '설정 동기화 고쳐 줘', changedAt: NOW - 180_000, at: NOW })
+  const host = panelHost(on, new Set(), { records: { '96394c1c-1': working } })
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['CLICKBAR'] }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  // 긴 이름은 버튼이 한 줄을 다 차지하지 않게 줄인다
+  expect(await ui.find({ type: 'Text', text: /^\[Claude Code 설정.*…\]$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '작업 중 3분째' })).toBeDefined()
+  await ui.press({ key: 'peer-go-96394c1c-1' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_c', '--json'])
+  await ui.unmount()
+  expect(clipName('SSO 연동', 18)).toBe('SSO 연동')
+  expect(clipName('성수역·뚝섬역 근처 분위기 좋은 카페', 18)).toBe('성수역·뚝섬역 근…')
+})
+
 test('터미널 호스트: herdr 응답에서 세션 패널·새 탭·화면을 꺼내고, 세션 위치는 herdr 패널을 Orca 탭보다 먼저 쓴다', async () => {
   const agents = JSON.stringify({ id: '1', result: { type: 'agent_list', agents: [
     { pane_id: 'w1:p1', terminal_title_stripped: '다른 작업', agent_session: { agent: 'claude', kind: 'id', source: 'herdr:claude', value: 'aaa-1' } },
@@ -628,6 +682,34 @@ test('권한 판정이 "물어봄"이면 승인 대기로, 도구가 돌기 시�
   expect(mine()).toBe('waiting')
   await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
   expect(mine()).toBe('working')
+})
+
+test('질문(AskUserQuestion)·계획 승인(ExitPlanMode)은 권한 판정이 허용이어도(bypass) 사람을 기다리므로 입력 필요로 기록한다', async ($, on) => {
+  const files = new Map<string, string>()
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
+  on('session.root', () => ({ value: 'D:\all' }))
+  on('session.id', () => ({ value: 'me' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('fs.write', (_, e) => {
+    files.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('fs.list', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.every', () => ({ value: undefined }))
+  on('tool.check', () => ({ decision: 'allow' as const }))
+  on('tool.call', () => ({ result: 'ok' }))
+  await $.session.start({ cwd: 'D:\all', surface: 'terminal', isInteractive: true })
+  const mine = () => JSON.parse(files.get(norm('C:/Users/me/.claude/mods-state/session-tracker/D-all/me.json')) ?? '{}').status
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
+  expect(mine()).toBe('idle')
+  await $.tool.check({ tool: 'AskUserQuestion', input: { questions: [] } })
+  expect(mine()).toBe('waiting')
+  await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+  expect(mine()).toBe('working')
+  await $.tool.check({ tool: 'ExitPlanMode', input: {} })
+  expect(mine()).toBe('waiting')
 })
 
 test('이름 고치기 준비: 다른 세션 입력창이 비었는지 화면으로 보고, 이름은 한 줄 60자로 정리한다', async () => {

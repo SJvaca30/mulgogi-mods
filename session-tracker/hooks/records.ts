@@ -11,7 +11,8 @@ export const SKIP_OLDER_MS = 24 * 3600_000
 export const PROMPT_MAX = 200
 export const NOTE_PROMPT_MAX = 120
 
-export const STATUS_WORDS: Record<Exclude<SessionStatus, 'ended'>, string> = { working: '작업 중', waiting: '승인 대기', idle: '대기 중' }
+// waiting은 사람의 답(도구 승인·질문·계획 승인)을 기다리는 상태다. 세션 패널의 "입력 필요"와 같은 낱말을 쓴다
+export const STATUS_WORDS: Record<Exclude<SessionStatus, 'ended'>, string> = { working: '작업 중', waiting: '입력 필요', idle: '대기 중' }
 
 /** 폴더 경로를 파일 이름에 쓸 수 있는 키로 바꾼다. D:\all → D-all */
 export function rootKey(root: string): string {
@@ -45,25 +46,40 @@ export function alivePeers(records: readonly SessionRecord[], selfId: string, ro
     .sort((a, b) => b.changedAt - a.changedAt)
 }
 
-export function agoText(ms: number): string {
-  const minutes = Math.max(0, Math.floor(ms / 60_000))
-  if (minutes < 1) return '방금'
-  if (minutes < 60) return `${minutes}분 전`
-
-  return `${Math.floor(minutes / 60)}시간 전`
-}
-
 export function firstLine(text: string, max: number): string {
   const line = text.split('\n').find(l => l.trim() !== '')?.trim() ?? ''
 
   return line.length > max ? `${line.slice(0, max)}…` : line
 }
 
-/** 다른 세션이 작업 중일 때만 Claude에게 붙이는 한 줄. 없으면 null */
-export function overlapNote(peers: readonly SessionRecord[]): string | null {
-  const working = peers.filter(p => p.status === 'working' || p.status === 'waiting')
-  if (working.length === 0) return null
-  const items = working.slice(0, 2).map(p => `"${firstLine(p.prompt, NOTE_PROMPT_MAX)}"`)
+/**
+ * 같은 폴더에서 이 세션과 겹칠 수 있는 세션: 작업 중이거나, 사람의 답을 받으면 이어서 고칠 세션.
+ * 쉬는 세션은 겹치지 않고 할 일도 없다. band의 다른 세션 칸과 Claude에게 붙이는 안내가 같은 기준을 쓴다
+ */
+export function activePeers(peers: readonly SessionRecord[]): SessionRecord[] {
+  // 사람의 답을 기다리는 세션이 먼저(할 일이 있다), 그다음 작업 중. 같은 상태끼리는 alivePeers의 순서(최근에 바뀐 것이 먼저)를 지킨다
+  return peers.filter(p => p.status === 'working' || p.status === 'waiting').sort((a, b) => Number(b.status === 'waiting') - Number(a.status === 'waiting'))
+}
 
-  return `참고(session-tracker): 같은 폴더에서 다른 Claude 세션 ${working.length}개가 작업 중이다(요청: ${items.join(', ')}). 같은 파일을 동시에 고치지 않도록, 겹칠 것 같으면 먼저 사용자에게 확인하라.`
+/** 지금 상태가 이어진 시간: 방금, N분째, N시간째 */
+export function spanText(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60_000))
+  if (minutes < 1) return '방금'
+  if (minutes < 60) return `${minutes}분째`
+
+  return `${Math.floor(minutes / 60)}시간째`
+}
+
+/** 다른 세션이 작업 중일 때만 Claude에게 붙이는 한 줄. 세션 이름을 알면 이름과 요청을 함께 쓴다. 없으면 null */
+export function overlapNote(peers: readonly SessionRecord[], nameOf?: (id: string) => string | undefined): string | null {
+  const working = activePeers(peers)
+  if (working.length === 0) return null
+  const items = working.slice(0, 2).map(p => {
+    const request = `"${firstLine(p.prompt, NOTE_PROMPT_MAX)}"`
+    const name = nameOf?.(p.id)
+
+    return name === undefined ? `요청: ${request}` : `${name}: ${request}`
+  })
+
+  return `참고(session-tracker): 같은 폴더에서 다른 Claude 세션 ${working.length}개가 작업 중이다(${items.join(', ')}). 같은 파일을 동시에 고치지 않도록, 겹칠 것 같으면 먼저 사용자에게 확인하라.`
 }
