@@ -600,6 +600,24 @@ test('band: 같은 폴더에서 작업 중인 세션은 claude agents의 이름�
   expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_c', '--json'])
   await ui.unmount()
   expect(clipName('SSO 연동', 18)).toBe('SSO 연동')
+})
+
+test('band: 백그라운드 작업을 herdr에서 보고 있으면, 세션 패널을 열지 않고 이름을 눌러도 herdr로 옮긴다', async ($, on) => {
+  const working = JSON.stringify({ id: '96394c1c-1', root: 'D:\\all', status: 'working', prompt: '설정 동기화 고쳐 줘', changedAt: NOW - 180_000, at: NOW })
+  const host = panelHost(on, new Set(), { records: { '96394c1c-1': working }, herdrViewer: 'title' })
+  on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['CLICKBAR'] }))
+  await $.session.start({ cwd: 'D:\\all', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({
+    plugin: 'session-tracker',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  await ui.press({ key: 'peer-go-96394c1c-1' })
+  // 탭이 없는 백그라운드 세션이라 herdr 새 탭에서 붙인다. Orca 탭은 만들지 않는다
+  expect(host.ran.some(a => a[0] === 'herdr' && a[1] === 'tab' && a[2] === 'create')).toBe(true)
+  expect(host.ran.some(a => a[0] === 'orca' && a[2] === 'create')).toBe(false)
+  await ui.unmount()
   expect(clipName('성수역·뚝섬역 근처 분위기 좋은 카페', 18)).toBe('성수역·뚝섬역 근…')
 })
 

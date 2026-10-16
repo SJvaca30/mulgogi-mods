@@ -621,6 +621,8 @@ async function openPanel($: EngineInterface) {
 
 // band에서 다른 세션의 이름을 눌렀을 때. 탭을 다루는 프로그램(Orca·herdr)이 있으면 그 세션으로 옮기고, 없으면 세션 패널을 연다
 async function goToPeer($: EngineInterface, sessionId: string) {
+  // 백그라운드 작업이면 지금 보고 있는 곳(Orca·herdr)을 먼저 확인한다(세션 패널을 열지 않았어도 맞는 프로그램으로 옮기게)
+  await safely($, '보는 곳 확인', () => checkViewer($))
   const row = lastRows.find(r => r.sessionId === sessionId && r.isLive)
   if (row === undefined || (await read($, host)) === '') return await openPanel($)
   const kind = row.kind === 'interactive' ? 'interactive' : 'background'
