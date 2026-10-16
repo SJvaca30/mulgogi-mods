@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { AgentRow, OnOffFilter, SessionItem, SessionRecord, SessionStatus, TitleEntry, ViewMode } from '../types'
-import { cleanName, composerHasText, findTerminal, kindWord, parseAgents, selfKindView, stateCounts, stateWord } from './panel'
+import { cleanName, composerHasText, createdHandle, findTerminal, kindWord, launchVerdict, parseAgents, screenLines, selfKindView, stateCounts, stateWord } from './panel'
 import type { Tone } from './panel'
 import { HEARTBEAT_MS, PROMPT_MAX, SKIP_OLDER_MS, STATUS_WORDS, agoText, alivePeers, firstLine, overlapNote, parseRecord, rootKey } from './records'
 import {
@@ -42,6 +42,10 @@ const renameDraft = atom({ plugin: 'session-tracker', key: 'renameDraft' } as co
 const stopArmed = atom({ plugin: 'session-tracker', key: 'stopArmed' } as const, '')
 const orcaReady = atom({ plugin: 'session-tracker', key: 'orcaReady' } as const, false)
 const opening = atom({ plugin: 'session-tracker', key: 'opening' } as const, '')
+const launching = atom({ plugin: 'session-tracker', key: 'launching' } as const, [])
+// 새 탭에서 Claude가 뜨기를 기다리는 최대 시간과 화면을 다시 읽는 간격. 넘기면 그 탭으로 옮기고 아직 여는 중이라고 알린다
+const LAUNCH_TIMEOUT_MS = 15_000
+const LAUNCH_POLL_MS = 800
 // 다른 세션이 /rename을 처리할 때까지 기다리는 시간, [끄기]를 한 번 누른 뒤 두 번째 누름을 기다리는 시간
 const RENAME_SETTLE_MS = 1500
 const STOP_CONFIRM_MS = 5000
@@ -342,27 +346,89 @@ async function openOff($: EngineInterface, item: SessionItem) {
       $.ui.toast(`이 대화의 폴더가 이 PC에 없습니다: ${item.cwd}`, { timeoutMs: 10000 })
       return
     }
-    const command = item.reopen === 'attach' ? `claude attach ${item.shortId || item.sessionId}` : `claude --resume ${item.sessionId}`
-    const worktrees = await $.process.run(['orca', 'worktree', 'list', '--json'], { timeoutMs: 15_000 })
-    if (worktrees.exitCode !== 0 || !orcaHasPath(worktrees.stdout, item.cwd)) {
-      $.ui.toast(`Orca에 등록되지 않은 폴더라 탭을 열지 못했습니다. 터미널에서 직접: cd "${item.cwd}" 후 ${command}`, { timeoutMs: 15000 })
-      return
-    }
-    const made = await $.process.run(['orca', 'terminal', 'create', '--worktree', `path:${item.cwd}`, '--title', item.name, '--command', command, '--focus', '--json'], { timeoutMs: 20_000 })
-    $.ui.toast(
-      made.exitCode !== 0
-        ? `열지 못했습니다: ${firstLine(made.stderr || made.stdout, 120)} · 직접: ${command}`
-        : item.reopen === 'attach'
-          ? `"${item.name}"을 백그라운드로 다시 켜서 새 탭에 붙였습니다`
-          : `"${item.name}"을 새 탭에서 포그라운드로 다시 열었습니다`,
-      { timeoutMs: 10000 },
-    )
   } catch (error) {
     $.ui.toast(`다시 열지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
     return
   }
-  await $.clock.sleep(RENAME_SETTLE_MS)
-  await refreshPanel($)
+  await openSession($, item, item.reopen === 'attach' ? 'attach' : 'resume')
+}
+
+type LaunchResult = { kind: 'ok' | 'slow' } | { kind: 'failed'; reason: string; command: string }
+
+/**
+ * 새 Orca 탭에서 그 대화를 연다. 탭을 앞으로 띄우지 않고 열어, 화면에 Claude가 뜬 것을 확인한 뒤에만 그 탭으로 옮긴다.
+ * 붙지 못하면 오류만 남은 셸 탭을 닫고 결과를 돌려준다(바로 띄우면, 실패했을 때 오류가 찍힌 셸 창만 남고 여기 알림은 보이지 않는다).
+ * attach는 claude agents의 짧은 id만 받고 어느 폴더에서든 붙는다. resume은 기록을 폴더별로 찾으므로 그 폴더에서 실행한다.
+ * 폴더가 Orca에 없으면 지금 작업 공간에 열고, resume이면 그 폴더로 옮긴 뒤 실행한다
+ */
+async function launchTab($: EngineInterface, item: SessionItem, how: 'attach' | 'resume'): Promise<LaunchResult> {
+  const worktrees = await $.process.run(['orca', 'worktree', 'list', '--json'], { timeoutMs: 15_000 })
+  const registered = worktrees.exitCode === 0 && orcaHasPath(worktrees.stdout, item.cwd)
+  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  const base = how === 'attach' ? `claude attach ${item.shortId}` : `claude --resume ${item.sessionId}`
+  const moved = !registered && how === 'resume'
+  const command = moved ? (isWindows ? `cd /d "${item.cwd}" && ${base}` : `cd '${item.cwd}' && ${base}`) : base
+  // cd /d는 cmd 문법이라, 폴더를 옮겨 실행할 때는 Windows에서 셸을 cmd로 정한다
+  const shell = moved && isWindows ? ['--shell', 'cmd.exe'] : []
+  const made = await $.process.run(
+    ['orca', 'terminal', 'create', '--worktree', registered ? `path:${item.cwd}` : 'active', '--title', item.name, '--command', command, ...shell, '--json'],
+    { timeoutMs: 20_000 },
+  )
+  const handle = made.exitCode === 0 ? createdHandle(made.stdout) : null
+  if (handle === null) return { kind: 'failed', reason: firstLine(made.stderr || made.stdout, 160) || 'Orca 탭을 만들지 못했습니다', command: base }
+  for (let waited = 0; waited < LAUNCH_TIMEOUT_MS; waited += LAUNCH_POLL_MS) {
+    await $.clock.sleep(LAUNCH_POLL_MS)
+    const screen = await $.process.run(['orca', 'terminal', 'read', '--terminal', handle, '--screen', '--json'], { timeoutMs: 15_000 })
+    const verdict = launchVerdict(screenLines(screen.stdout), item.name)
+    if (verdict.kind === 'failed') {
+      await $.process.run(['orca', 'terminal', 'close', '--terminal', handle, '--tab', '--json'], { timeoutMs: 15_000 })
+      return { kind: 'failed', reason: verdict.reason, command: base }
+    }
+    if (verdict.kind === 'ok') break
+    if (waited + LAUNCH_POLL_MS >= LAUNCH_TIMEOUT_MS) {
+      await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
+      return { kind: 'slow' }
+    }
+  }
+  await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
+
+  return { kind: 'ok' }
+}
+
+/**
+ * [이동]·[열기]로 새 탭을 여는 동안 그 줄에 "여는 중…"을 보이고(다시 눌러도 또 열지 않는다), 끝나면 결과를 알린다.
+ * 붙일 백그라운드 작업이 그사이 정리됐으면(No job matching) 기록으로 다시 연다. 짧은 id가 없는 세션도 기록으로 연다
+ */
+async function openSession($: EngineInterface, item: SessionItem, how: 'attach' | 'resume') {
+  if ((await read($, launching)).includes(item.sessionId)) return
+  await update($, launching, old => [...old, item.sessionId])
+  $.ui.toast(`"${item.name}"을(를) 새 탭에서 여는 중입니다…`)
+  try {
+    const first = how === 'attach' && item.shortId !== '' ? 'attach' : 'resume'
+    let result = await launchTab($, item, first)
+    let fellBack = false
+    if (result.kind === 'failed' && first === 'attach' && /No job matching/i.test(result.reason) && (await $.fs.exists(item.cwd))) {
+      fellBack = true
+      result = await launchTab($, item, 'resume')
+    }
+    $.ui.toast(
+      result.kind === 'failed'
+        ? `"${item.name}"을(를) 열지 못했습니다: ${result.reason} · 터미널에서 직접 실행: ${result.command}`
+        : result.kind === 'slow'
+          ? `"${item.name}" 탭이 아직 열리는 중입니다. 새 탭을 확인하세요`
+          : fellBack
+            ? `백그라운드 작업이 이미 정리돼 연결할 수 없어, "${item.name}"을(를) 기록으로 새 탭에서 다시 열었습니다`
+            : first === 'attach'
+              ? `"${item.name}"에 연결했습니다. 탭을 닫아도 백그라운드 세션은 계속 실행됩니다`
+              : `"${item.name}"을(를) 새 탭에서 다시 열었습니다`,
+      { timeoutMs: result.kind === 'failed' ? 15000 : 8000 },
+    )
+  } catch (error) {
+    $.ui.toast(`"${item.name}"을(를) 열지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    await update($, launching, old => old.filter(id => id !== item.sessionId))
+    await refreshPanel($)
+  }
 }
 
 // 목록은 15초마다 읽으므로, 꺼진 대화를 열기 직전에 그사이 켜졌는지 한 번 더 본다(두 터미널이 같은 기록에 쓰면 메시지가 섞인다)
@@ -469,32 +535,23 @@ async function openPanel($: EngineInterface) {
   await refreshPanel($)
 }
 
-// 그 세션의 Orca 탭으로 간다. 탭이 없는 백그라운드 세션은 새 탭을 열어 claude attach 로 붙인다
-// (← 로 agent view, 탭을 닫아도 세션은 계속 돈다). 대화형 세션은 붙일 방법이 없어 안내만 한다.
-async function switchTo($: EngineInterface, row: { name: string; kind: string; sessionId: string; cwd: string }) {
-  const { name } = row
+// 그 세션의 Orca 탭으로 옮긴다(탭 제목 = 세션 이름). 탭이 없는 백그라운드 세션은 새 탭에서 붙인다(openSession, ← 로 agent view,
+// 탭을 닫아도 세션은 계속 돈다). 탭이 없는 포그라운드 세션은 Orca 밖의 창에서 돌고 있어 여기서 열지 않는다(두 창이 한 기록에 쓰면 메시지가 섞인다)
+async function switchTo($: EngineInterface, item: SessionItem) {
+  const { name } = item
   try {
     const list = await $.process.run(['orca', 'terminal', 'list', '--json'], { timeoutMs: 15_000 })
     const handle = list.exitCode === 0 ? findTerminal(list.stdout, name) : null
-    if (handle === null && row.kind === 'background' && row.sessionId !== '') {
-      const made = await $.process.run(
-        ['orca', 'terminal', 'create', '--worktree', `path:${row.cwd}`, '--title', name, '--command', `claude attach ${row.sessionId}`, '--focus', '--json'],
-        { timeoutMs: 20_000 },
-      )
-      $.ui.toast(
-        made.exitCode === 0
-          ? `"${name}"은 Orca 탭 없이 백그라운드에서 돌고 있어 새 탭에서 붙였습니다. 탭을 닫아도 세션은 계속 돕니다`
-          : `새 Orca 탭을 열지 못했습니다: ${firstLine(made.stderr || made.stdout, 120)}`,
-        { timeoutMs: 10000 },
-      )
+    if (handle !== null) {
+      const done = await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
+      if (done.exitCode !== 0) $.ui.toast(`Orca 탭으로 전환하지 못했습니다: ${firstLine(done.stderr || done.stdout, 120)}`)
       return
     }
-    if (handle === null) {
-      $.ui.toast(`"${name}" 세션의 Orca 탭을 찾지 못했습니다. 탭 제목이 세션 이름과 다르면 못 찾습니다(/rename 으로 맞추면 찾음)`, { timeoutMs: 10000 })
-      return
-    }
-    const done = await $.process.run(['orca', 'terminal', 'switch', '--terminal', handle, '--json'], { timeoutMs: 15_000 })
-    if (done.exitCode !== 0) $.ui.toast(`Orca 탭으로 전환하지 못했습니다: ${firstLine(done.stderr || done.stdout, 120)}`)
+    if (item.kind === 'background') return await openSession($, item, 'attach')
+    $.ui.toast(
+      `"${name}"은(는) Orca 탭에서 찾지 못했습니다. Orca 밖의 창(cmd 등)에서 실행 중이라 여기서 열지 않습니다. 그 창에서 이어 쓰거나, 그 창을 닫은 뒤 [열기]로 다시 여세요`,
+      { timeoutMs: 12000 },
+    )
   } catch (error) {
     $.ui.toast(`Orca를 부르지 못했습니다: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -728,6 +785,7 @@ export const register: Register = on => {
     const running = await read($, subagents)
     const at = await read($, readAt)
     const editing = await read($, renaming)
+    const launchingIds = await read($, launching)
     const draft = await read($, renameDraft)
     const armed = await read($, stopArmed)
     const managed = await read($, managing)
@@ -829,6 +887,9 @@ export const register: Register = on => {
                 <Text color="suggestion" bold>
                   이 대화
                 </Text>
+              ) : launchingIds.includes(it.sessionId) ? (
+                // 새 탭에서 Claude가 뜨기를 기다리는 동안은 누를 수 없게 글로만 보인다
+                <Text dimColor>여는 중…</Text>
               ) : isOff ? (
                 button(`agent-open-${it.sessionId}`, '열기', () => void (hasOrca ? openOff($, it) : toggleOpening(it)))
               ) : hasOrca ? (

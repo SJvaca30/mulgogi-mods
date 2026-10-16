@@ -225,7 +225,8 @@ export function arrange(
  * 기록만 남은 대화는 그 폴더로 가서 다시 연다(cd 없이 열면 지금 폴더의 대화로 열린다)
  */
 export function reopenCommand(item: Pick<SessionItem, 'cwd' | 'sessionId' | 'shortId' | 'reopen' | 'kind'>): string {
-  if (item.kind === 'background' || item.reopen === 'attach') return `claude attach ${item.shortId || item.sessionId}`
+  // claude attach는 claude agents의 짧은 id만 받는다(긴 세션 id는 "No job matching"). 짧은 id가 없으면 기록으로 다시 연다
+  if ((item.kind === 'background' || item.reopen === 'attach') && item.shortId !== '') return `claude attach ${item.shortId}`
 
   return `cd "${item.cwd}" && claude --resume ${item.sessionId}`
 }

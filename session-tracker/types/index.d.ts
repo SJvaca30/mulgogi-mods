@@ -83,6 +83,8 @@ declare module 'claude-code' {
       orcaReady: boolean
       /** Orca 없이 [열기]·[이동]을 누른 대화의 sessionId(그 줄 아래에 여기서 열기·명령 복사가 열림), 아니면 '' */
       opening: string
+      /** 새 Orca 탭에서 여는 중인 대화의 sessionId. 그 줄의 [이동]·[열기] 자리에 "여는 중…"을 보이고 다시 누르지 않게 한다 */
+      launching: string[]
     }
   }
 }

@@ -120,6 +120,47 @@ export function composerHasText(stdout: string): boolean {
   return typed !== '' && !/^Try "/.test(typed)
 }
 
+/** orca terminal read --screen --json 결과의 화면 줄. 형식이 다르면 빈 배열 */
+export function screenLines(stdout: string): string[] {
+  try {
+    const parsed = JSON.parse(stdout) as { result?: { terminal?: { tail?: unknown } } }
+    const tail = parsed?.result?.terminal?.tail
+
+    return Array.isArray(tail) ? tail.map(String) : typeof tail === 'string' ? tail.split('\n') : []
+  } catch {
+    return []
+  }
+}
+
+/** orca terminal create --json 결과에서 새 탭의 handle. 없으면 null */
+export function createdHandle(stdout: string): string | null {
+  try {
+    const parsed = JSON.parse(stdout) as { result?: { terminal?: { handle?: unknown }; handle?: unknown } }
+    const handle = parsed?.result?.terminal?.handle ?? parsed?.result?.handle
+
+    return typeof handle === 'string' && handle !== '' ? handle : null
+  } catch {
+    return null
+  }
+}
+
+export type LaunchVerdict = { kind: 'ok' } | { kind: 'failed'; reason: string } | { kind: 'pending' }
+
+/**
+ * 새로 연 탭의 화면을 보고 Claude가 떴는지 판단한다. 입력창 테두리의 세션 이름(─ 이름 ─), 시작 머리글(Claude Code v…),
+ * 모드 줄 안내가 보이면 떴다. 그 전에 오류 줄(No job matching 등)이 보이면 실패와 그 줄, 둘 다 없으면 아직 여는 중이다
+ */
+export function launchVerdict(lines: readonly string[], name: string): LaunchVerdict {
+  // 오른쪽에 패널이 붙어 있으면 줄 뒤쪽에 패널 글자가 이어지므로, 패널 경계(│) 앞까지만 본다
+  const left = lines.map(l => l.split('│')[0] ?? '')
+  const label = name.slice(0, 20)
+  const isClaude = left.some(l => (label !== '' && l.includes(`─ ${label}`)) || /Claude Code v\d|shift\+tab to cycle|\? for shortcuts|── clickbar|── 세션/.test(l))
+  if (isClaude) return { kind: 'ok' }
+  const error = left.find(l => /No job matching|No conversation found|is not recognized as|command not found|Error:/i.test(l))
+
+  return error === undefined ? { kind: 'pending' } : { kind: 'failed', reason: error.trim().slice(0, 160) }
+}
+
 type OrcaTerminal = { handle?: unknown; title?: unknown }
 
 /** Orca 탭 제목 앞의 상태 기호(✳, ⠂ 같은 것)를 떼고 세션 이름과 맞는 탭을 찾는다 */

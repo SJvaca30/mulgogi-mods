@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { cleanName, composerHasText, findTerminal, kindWord, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
+import { cleanName, composerHasText, findTerminal, kindWord, launchVerdict, parseAgents, selfKindView, stateCounts, stateWord } from '../hooks/panel'
 import { DEFAULT_VIEW, arrange, buildItems, dayTitle, orcaHasPath, parseHistory, parseIdList, parseView, sinceText } from '../hooks/sessions'
 import { alivePeers, overlapNote, parseRecord, rootKey } from '../hooks/records'
 import type { SessionRecord } from '../types'
@@ -186,13 +186,16 @@ const entry = (name: string, kind: 'file' | 'dir', mtimeMs = NOW, size = 100) =>
 
 // 세션 패널 테스트의 엔진 자리: 기록 폴더 목록, history.jsonl, $.store, claude agents, 제목 도우미(pwsh), Orca를 흉내 낸다.
 // liveAlso에 넣은 대화는 [열기] 직전의 다시 확인에서 켜진 것으로 나온다. noOrca면 orca 명령이 없는 일반 터미널, root는 이 세션의 폴더
-function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string } = {}) {
+function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(), opts: { noOrca?: boolean; root?: string; attachFails?: boolean; noWorktree?: boolean; windows?: boolean } = {}) {
   const ran: string[][] = []
+  const created: { title: string; command: string }[] = []
   const copies: string[] = []
   const toasts: string[] = []
   const commands: { command: string; args?: string }[] = []
   const store = new Map<string, unknown>()
-  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? 'C:/Users/me/.claude/jobs/abc12345' : undefined }))
+  on('env.get', (_, e) => ({
+    value: e.name === 'USERPROFILE' ? 'C:/Users/me' : e.name === 'CLAUDE_JOB_DIR' ? 'C:/Users/me/.claude/jobs/abc12345' : e.name === 'OS' && opts.windows ? 'Windows_NT' : undefined,
+  }))
   on('session.root', () => ({ value: opts.root ?? 'D:\\all' }))
   on('session.id', () => ({ value: 'me' }))
   on('clock.now', () => ({ value: NOW }))
@@ -263,8 +266,20 @@ function panelHost(on: Parameters<TestBody>[1], liveAlso: Set<string> = new Set(
       const found = paths.map(path => ({ p: path, c: '', a: path.endsWith('83b9eb02-1.jsonl') ? 'Orca의 미사용 세션' : '', w: path.includes('spare-1') ? '' : 'D:\\all' }))
       return ok(JSON.stringify(found))
     }
-    if (argv[1] === 'worktree') return ok(JSON.stringify({ ok: true, result: { worktrees: [{ path: 'D:\\all' }, { path: 'D:\\other-project' }] } }))
+    if (argv[1] === 'worktree') return ok(JSON.stringify({ ok: true, result: { worktrees: opts.noWorktree ? [] : [{ path: 'D:\\all' }, { path: 'D:\\other-project' }] } }))
     if (argv[2] === 'list') return ok(JSON.stringify({ ok: true, result: { terminals: [{ handle: 'term_b', title: '⠂ SSO 연동' }, { handle: 'term_c', title: '⠂ Claude Code 설정 동기화 ⑂' }] } }))
+    if (argv[2] === 'create') {
+      created.push({ title: argv[argv.indexOf('--title') + 1] ?? '', command: argv[argv.indexOf('--command') + 1] ?? '' })
+      return ok(JSON.stringify({ ok: true, result: { terminal: { handle: `term_new${created.length}` } } }))
+    }
+    if (argv[2] === 'read' && String(argv[4]).startsWith('term_new')) {
+      const tab = created[Number(String(argv[4]).slice('term_new'.length)) - 1] ?? { title: '', command: '' }
+      const failed = opts.attachFails === true && tab.command.startsWith('claude attach')
+      const tail = failed
+        ? [`No job matching '${tab.command.split(' ')[2]}'. Run 'claude agents' to list running sessions.`, 'D:\\all>']
+        : ['─'.repeat(30) + ` ${tab.title} ─`, '❯ ', '─'.repeat(40)]
+      return ok(JSON.stringify({ ok: true, result: { terminal: { tail } } }))
+    }
     if (argv[2] === 'read') return ok(JSON.stringify({ ok: true, result: { terminal: { tail: ['─'.repeat(40), '❯ ', '─'.repeat(40)] } } }))
 
     return ok('{}')
@@ -361,7 +376,9 @@ test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터
   await ui.press({ key: 'agent-go-2561affb-1' })
   expect(host.ran).toContainEqual(['claude', 'agents', '--json', '--all'])
   expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_b', '--json'])
-  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\other-project', '--title', 'frontend 2', '--command', 'claude attach 2561affb-1', '--focus', '--json'])
+  // 탭이 없는 백그라운드 세션: 앞으로 띄우지 않고 짧은 id로 붙인 뒤, Claude가 뜬 것을 확인하고 그 탭으로 옮긴다
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\other-project', '--title', 'frontend 2', '--command', 'claude attach 2561affb', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_new1', '--json'])
   // 보기와 상태 필터는 저장되고, 필터는 보기마다 따로다
   await ui.press({ key: 'view-date' })
   await ui.press({ key: 'filter-off' })
@@ -403,10 +420,53 @@ test('세션 패널: 꺼진 대화를 유휴로 보이고, 보기·상태 필터
   expect(await ui.find({ key: 'filter-all' })).toBeDefined()
   // 열기: 기록만 남은 대화는 --resume, 멈춘 백그라운드 세션은 attach
   await ui.press({ key: 'agent-open-83b9eb02-1' })
-  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', 'Orca의 미사용 세션', '--command', 'claude --resume 83b9eb02-1', '--focus', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', 'Orca의 미사용 세션', '--command', 'claude --resume 83b9eb02-1', '--json'])
   await ui.press({ key: 'agent-open-30a5238d-1' })
-  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', '청년미래적금 연계가입 안내', '--command', 'claude attach 30a5238d', '--focus', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\all', '--title', '청년미래적금 연계가입 안내', '--command', 'claude attach 30a5238d', '--json'])
   await ui.unmount()
+})
+
+test('세션 패널 [이동]: 붙일 작업이 그사이 정리됐으면 실패한 탭을 닫고 기록으로 다시 연다', async ($, on) => {
+  const host = panelHost(on, new Set(), { attachFails: true })
+  const ui = await openPanel($)
+  await ui.press({ key: 'agent-go-2561affb-1' })
+  // 붙기 실패(No job matching): 오류만 남은 셸 탭을 닫는다
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'close', '--terminal', 'term_new1', '--tab', '--json'])
+  // 기록으로 그 폴더에서 다시 열고, 뜬 것을 확인한 뒤 그 탭으로 옮긴다
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'path:D:\\other-project', '--title', 'frontend 2', '--command', 'claude --resume 2561affb-1', '--json'])
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_new2', '--json'])
+  expect(host.toasts.some(t => t.includes('기록으로 새 탭에서 다시 열었습니다'))).toBe(true)
+  await ui.unmount()
+})
+
+test('세션 패널 [이동]: Orca 탭이 없는 포그라운드 세션은 새로 열지 않고 그 창에서 쓰라고 알린다', async ($, on) => {
+  const host = panelHost(on)
+  const ui = await openPanel($)
+  // SSO 연동은 탭 제목으로 찾는다. 다른 이름의 포그라운드 세션은 Orca 밖의 창에서 돌고 있는 것으로 본다
+  await ui.press({ key: 'agent-go-7148776f-1' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'switch', '--terminal', 'term_b', '--json'])
+  expect(host.ran.some(a => a[2] === 'create')).toBe(false)
+  await ui.unmount()
+})
+
+test('세션 패널 [열기]: Orca에 없는 폴더의 기록은 지금 작업 공간의 탭에서 그 폴더로 옮겨 연다(Windows는 cmd로)', async ($, on) => {
+  const host = panelHost(on, new Set(), { noWorktree: true, windows: true })
+  const ui = await openPanel($)
+  await ui.press({ key: 'agent-open-83b9eb02-1' })
+  expect(host.ran).toContainEqual(['orca', 'terminal', 'create', '--worktree', 'active', '--title', 'Orca의 미사용 세션', '--command', 'cd /d "D:\\all" && claude --resume 83b9eb02-1', '--shell', 'cmd.exe', '--json'])
+  await ui.unmount()
+})
+
+test('새 탭 화면 판정: 세션 이름 테두리·시작 머리글이면 떴고, 오류 줄이면 실패, 둘 다 없으면 여는 중', async () => {
+  expect(launchVerdict(['─'.repeat(20) + ' 결제 리팩터링 ─', '❯ '], '결제 리팩터링')).toEqual({ kind: 'ok' })
+  expect(launchVerdict([' ▐▛███▛█   Claude Code v2.1.300'], '아무 이름')).toEqual({ kind: 'ok' })
+  expect(launchVerdict(["No job matching 'b6873318-1'. Run 'claude agents' to list running sessions.", 'D:\\all>'], 'x')).toEqual({
+    kind: 'failed',
+    reason: "No job matching 'b6873318-1'. Run 'claude agents' to list running sessions.",
+  })
+  expect(launchVerdict(['Microsoft Windows [Version 10.0]', 'D:\\all>claude attach b6873318'], 'x')).toEqual({ kind: 'pending' })
+  // 오른쪽에 붙은 패널 글자는 보지 않는다
+  expect(launchVerdict(['D:\\all>                    │ ── 세션 ──'], 'x')).toEqual({ kind: 'pending' })
 })
 
 test('세션 패널: [열기] 직전에 다시 보고 그사이 켜진 대화는 두 번 열지 않는다', async ($, on) => {
